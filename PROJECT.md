@@ -56,6 +56,15 @@ the write lock at a time. See Ownership Model.
 Q: How many callers can write at once?
 A: One. Any number can read/watch concurrently.
 
+Q: Should every AI agent invocation be forced through `agent-tmux`, all the time?
+A: No — explicitly rejected. The user wants **both**: normal, everyday agent
+sessions keep running bash however that tool normally does (unrestricted, fast,
+no ceremony), and a **separate, deliberately-invoked** agent persona (named
+`investigator`, §10) is the one routed exclusively through `agent-tmux`, for the
+specific case of higher-stakes work (e.g. prod SSH + k8s recon) where a human may
+need to see/take over the terminal. This is a two-tier design, not a global policy
+change — don't "improve" this by making the default agent path mandatory-tmux.
+
 ## Rejected Architectures
 
 Q: Why not a custom PTY broker (`openpty` + a VT100 emulator)?
@@ -315,7 +324,84 @@ standard's folder-per-skill layout (`<skills-dir>/agent-tmux/SKILL.md`), confirm
 against Claude Code's and GitHub Copilot's own skills documentation — this repo had no
 install path documented for either the skill or the agents before this was added.
 
-## 11. How To Rebuild This, In Order
+## 11. Enforcement Strength Ladder (how "hard" can we make agents use this?)
+
+Getting an AI coding agent to actually route shell work through `agent-tmux`, instead
+of quietly falling back to its own raw bash tool, is a spectrum from "polite
+suggestion" to "technically impossible to bypass." Ranked weakest → strongest,
+evaluated for this project:
+
+1. **Plain instructions/prompt text** — cheapest, no enforcement; the agent can ignore
+   it under context pressure.
+2. **`SKILL.md`** (what this repo ships, §10) — model-invoked advisory guidance,
+   loaded automatically when relevant. Stronger than raw instructions because it's a
+   standardized, tool-recognized mechanism, but still advisory — nothing stops a plain
+   bash tool call.
+3. **Custom agent with a restricted tool list** (`investigator`, §10) — meaningfully
+   stronger: if the agent persona's frontmatter only exposes `bash`/`execute` wired to
+   `agent-tmux`-style usage (via its system prompt) and the user explicitly invokes
+   that persona, there's a real behavioral nudge, but the underlying tool is still
+   "run a shell command" — a sufficiently determined model can still shell out around
+   the convention inside that same tool call.
+4. **MCP server exposing `agent-tmux` operations as the only shell-shaped tool, with
+   the raw bash/terminal tool denied at the harness level** — the strongest *portable*
+   lever: if raw bash isn't offered to the model at all, there's nothing to bypass to.
+   Not implemented here; identified as the correct next step if hard enforcement is
+   ever required, since it works the same way across tools that support MCP.
+5. **Deterministic `PATH` shim** (e.g. a `ssh`/`bash` wrapper script ahead of the real
+   binaries in `PATH` that redirects into `agent-tmux`) — enforces at the OS level
+   regardless of what the agent *thinks* it's doing, but it's a blunt, global
+   trap that also affects the human's own shell and any non-agent tooling; not
+   pursued.
+6. **Harness `preToolUse` hooks** — confirmed (via official docs) to exist for
+   **Claude Code** (`hooks.PreToolUse` in subagent frontmatter) and **Copilot CLI**
+   (`.github/hooks/*.json` or `~/.copilot/hooks/*.json`), and can approve/deny a tool
+   call before it runs — true hard enforcement, per-tool, without needing a PATH
+   trap. **Confirmed absent for VS Code Copilot chat** (docs.github.com/en/copilot/
+   concepts/agents/hooks scopes hooks to Copilot CLI and the Copilot cloud agent only)
+   — VS Code would need option 4 (MCP + tool-deny) to reach equivalent strength.
+   Identified as feasible and the strongest *tool-native* lever for two of the three
+   tools, but **not implemented** — explicitly deferred, out of scope for what was
+   asked so far.
+7. **After-the-fact review** (diff/log auditing once work is done) — weakest as a
+   *preventive* control, but cheap and composable with any of the above as a safety
+   net.
+
+Current state of this repo: level 2 (`SKILL.md`, advisory, any agent) + level 3
+(`investigator` custom agent, explicit invocation only) are implemented. Levels 4 and
+6 are the known, deliberate next steps if the trust model in §6 (self-reported actor
+id, cooperative isolation) ever needs to become a hard boundary instead.
+
+Q: Why ship both a skill (advisory) and a custom agent (restricted persona) instead of
+picking one?
+A: They solve different problems. The skill makes *any* agent session that happens to
+need shell/SSH work aware of `agent-tmux` with zero setup. The `investigator` agent is
+for the case where the user wants to *deliberately switch into* a constrained,
+tmux-routed persona for a specific task (e.g. a prod incident) — that requires
+explicit invocation and a distinct identity (§6's actor-id shape), which a skill alone
+can't provide since a skill doesn't change which tools an agent is allowed to call.
+
+Q: Why is the custom agent named `investigator` and not something new like
+`prod-incident`?
+A: The user already had a pre-existing VS Code custom agent named `investigator` (raw
+bash/ssh-based, no `agent-tmux` awareness). Rather than introduce a second, similarly-
+named agent, the old one was preserved as `investigator-archive` (`disable-model-
+invocation: true`, kept for reference/rollback) and the name `investigator` was
+reclaimed for the new `agent-tmux`-routed version — one canonical name per tool,
+no ambiguity about which "investigator" a user is invoking.
+
+Q: Where do the skill/agent schemas actually differ across the three tools, in
+practice?
+A: VS Code Copilot and Copilot CLI **share** the same `.agent.md` frontmatter schema
+(`name`, `description`, `tools`, `model`, `target`, `disable-model-invocation`,
+`user-invocable`) — they differ only in which tool names exist in that namespace
+(VS Code: `execute/runInTerminal`, `execute/sendToTerminal`, etc.; CLI: plain `bash`).
+Claude Code subagents use their own format (`.claude/agents/*.md`: `name`,
+`description`, `tools`, `model`, optionally `hooks`). This is why the repo ships three
+separate agent files (`agents/investigator.{vscode,copilot-cli}.agent.md`,
+`agents/investigator.claude.md`) rather than one shared file.
+
+## 12. How To Rebuild This, In Order
 
 If you're starting from zero with only this file:
 
@@ -337,6 +423,18 @@ If you're starting from zero with only this file:
 7. Add the status bar from §7, respecting the one-attribute-per-style-tag rule (§4.4),
    and verify the *rendered* output with a real attached client, not `display-message`.
 8. Write the agent-facing skill per §10, pointing at an already-installed binary.
+9. Ship the `investigator` custom agent per §10/§11 for each supported tool, and add
+   symlink-based install targets (`make install-skill`/`install-agents`) so the repo
+   stays the single source of truth instead of hand-copied files drifting per tool.
 
 Everything else in the current codebase (`README.md`, tests, `Makefile`) is a faithful
 implementation of the above and can be regenerated; this file is the part that can't.
+
+Q: Has this actually been built and installed for real (not just `make -n` dry-run),
+end to end?
+A: Yes — `make build` (produces `bin/agent-tmux`) and `make install` (`go install
+./cmd/agent-tmux` → `~/go/bin/agent-tmux`, already on `PATH`) were both run for real
+on the dev machine; `agent-tmux doctor` and `--help` were used to confirm the
+installed binary resolves and finds tmux/the socket correctly. `make install-skill`
+and `make install-agents` were likewise run for real, not just dry-run-checked — the
+live symlinks listed in §10 are the proof.
