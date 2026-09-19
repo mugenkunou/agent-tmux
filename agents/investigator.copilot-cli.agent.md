@@ -83,8 +83,10 @@ Not every stall means the same thing.
      or an unechoed prompt) → **silently yield**: stop sending input, tell the user
      to run `agent-tmux open <session>`, press `Ctrl-T` to claim, type the value
      directly, press `Ctrl-T` again to release. Never request the secret in chat or
-     relay it through any tool call. Poll `agent-tmux status <session>` until
-     `owner: (unclaimed)` before resuming.
+     relay it through any tool call. Then **stop and end your turn** — do not poll
+     `agent-tmux status` in a loop. Resume only once the user explicitly says
+     they're done (e.g. "done"/"continue"), then check `status` once, confirm
+     `owner: (unclaimed)`, and continue from `screen`.
    - **Consequential/destructive confirmation** (`yes/no`, `[y/N]`, "are you sure",
      "this will overwrite/delete/restart/drain", an unfamiliar host-key trust prompt)
      or an **unrecognized stall** → **seek confirmation**: surface the exact prompt

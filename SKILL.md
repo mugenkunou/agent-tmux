@@ -105,9 +105,13 @@ Not every stall means the same thing, so classify before reacting:
    2. If the user hasn't already run `agent-tmux open <session>`, tell them to run it now.
    3. Tell them to press `Ctrl-T` to claim control, type the value directly, then press `Ctrl-T` again to release.
    4. Never request the secret in chat or relay it through any tool call.
-   5. Poll `agent-tmux status <session>` until `owner: (unclaimed)` before resuming —
-      while owner is set, `send`/`run`/`key` are refused; don't retry blindly.
-   6. Once unclaimed, inspect `screen` and continue from the resulting state.
+   5. Stop here and end your turn. Do **not** poll `agent-tmux status <session>` in a
+      loop waiting for release — while owner is set, `send`/`run`/`key` are refused
+      anyway, so looping only burns turns/tool calls without doing anything useful.
+   6. Resume only when the user explicitly tells you they're done (e.g. "done",
+      "continue", "go ahead") — treat that message, not a background retry, as the
+      trigger. At that point check `agent-tmux status <session>` once, confirm
+      `owner: (unclaimed)`, inspect `screen`, and continue from the resulting state.
 
 3b. **Seek confirmation** (consequential or unrecognized prompts):
 

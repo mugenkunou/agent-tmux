@@ -300,6 +300,15 @@ A companion `SKILL.md` teaches an AI agent to route **all** shell work through
     non-secret answer may be relayed via `send` if the user is comfortable with that;
     otherwise fall back to the same `open`+`Ctrl-T` handoff.
 
+Q: While waiting for a human to finish typing a secret, should the agent keep calling
+`agent-tmux status` in a loop to detect release?
+A: No — explicitly corrected. Looping `status` calls burns turns/tool calls for no
+benefit (the human isn't necessarily fast, and `send`/`run`/`key` are refused the
+whole time regardless). Both `SKILL.md` and the `investigator` agents now instruct:
+stop and **end the turn** once yielding, and only check `status`/`screen` again after
+the user explicitly says they're done (e.g. "done", "continue") — the user's message
+is the resume trigger, not a background poll.
+
 Beyond the skill (advisory, for any agent doing routine shell work), the `agents/`
 directory in this repo ships ready-made, tool-specific **custom agent** definitions —
 all named `investigator` — for dedicated, higher-stakes work (e.g. a human explicitly
