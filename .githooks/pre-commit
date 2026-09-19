@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Blocks commits that introduce secrets, using gitleaks against staged changes.
+# Enable with: make hooks   (or: git config core.hooksPath .githooks)
+set -euo pipefail
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+	echo "pre-commit: gitleaks not found on PATH; skipping secret scan." >&2
+	echo "  install: https://github.com/gitleaks/gitleaks#installing" >&2
+	exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+# /tmp is noexec on some dev boxes (see PROJECT.md); keep gitleaks' scratch
+# files workspace-local so the scan itself never fails for unrelated reasons.
+export TMPDIR="$repo_root/.tmp"
+mkdir -p "$TMPDIR"
+
+if ! gitleaks protect --staged --redact --verbose --config "$repo_root/.gitleaks.toml"; then
+	echo >&2
+	echo "pre-commit: gitleaks found a likely secret in staged changes; commit blocked." >&2
+	echo "Remove the secret (or add a documented false-positive rule to .gitleaks.toml) and try again." >&2
+	exit 1
+fi

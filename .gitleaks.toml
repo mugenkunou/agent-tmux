@@ -1,0 +1,7 @@
+title = "agent-tmux gitleaks config"
+
+# Use gitleaks' maintained default ruleset (broad secret-provider coverage).
+# Add [[rules]]/[allowlist] entries here only for verified false positives,
+# with a comment explaining why each exemption is safe.
+[extend]
+useDefault = true

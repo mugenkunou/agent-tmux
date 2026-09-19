@@ -1,0 +1,4 @@
+/bin/
+/.tmp/
+/.agent-tmux-smoke.*/
+.DS_Store
