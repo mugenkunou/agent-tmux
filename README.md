@@ -129,6 +129,52 @@ agent-tmux kill work
 
 `open` currently needs one `Ctrl-T` before `Ctrl-Q` if the session is unclaimed, since tmux discards any bound command chain other than a bare `detach-client`/`switch-client` while a client is read-only — `Ctrl-Q` sets the quit flag as part of a chain, which only reliably fires once the client is writable.
 
+## Agent Integration
+
+`SKILL.md` teaches an AI agent to route ordinary shell work through `agent-tmux`. For
+dedicated, higher-stakes work (production incident investigation over SSH/sudo/kubectl,
+where every command should be classified and secrets/approvals always hand off to a
+human) the `agents/` directory ships a ready-made custom agent named `investigator`,
+one file per tool, since each has its own schema.
+
+Install everything with one command:
+
+```bash
+make install-integration   # SKILL.md + the investigator agent, all three tools
+```
+
+or install either piece on its own:
+
+```bash
+make install-skill   # SKILL.md only
+make install-agents  # investigator agent only
+```
+
+These symlink files from this repo into place, so `git pull` here keeps the installed
+copies current — nothing is duplicated by hand.
+
+| Content | File | Installed to |
+| --- | --- | --- |
+| Skill | `SKILL.md` | `~/.claude/skills/agent-tmux/SKILL.md` (Claude Code) and `~/.copilot/skills/agent-tmux/SKILL.md` (Copilot CLI) |
+| Agent | `agents/investigator.vscode.agent.md` | `~/.config/Code/User/prompts/investigator.agent.md` (GitHub Copilot in VS Code) |
+| Agent | `agents/investigator.copilot-cli.agent.md` | `~/.copilot/agents/investigator.agent.md` (GitHub Copilot CLI) |
+| Agent | `agents/investigator.claude.md` | `~/.claude/agents/investigator.md` (Claude Code) |
+
+Both skill and agent installs are user-level (apply across every repo you work in),
+mirroring `AGENT_TMUX_ACTOR_ID`'s "set once per logical caller" model. Repo-level
+placement (`.github/skills/`, `.github/agents/`, `.claude/skills/`, `.claude/agents/`)
+is also supported by these tools if you'd rather scope either to one project — copy
+the same files there manually if so.
+
+VS Code Copilot's own skill-discovery path (as opposed to custom agents, which are
+handled by `install-agents` above) is still settling upstream at the time of writing;
+if it doesn't pick up `SKILL.md` from a shared Copilot location automatically, check
+VS Code's Skills UI/settings for the current expected directory.
+
+Every install target defines `name: investigator` (or `name: "investigator"`,
+depending on the tool's YAML style) — none of these files claim any other name, so
+they won't collide with a differently named custom agent you already have.
+
 ## Ownership Model
 
 There is no built-in notion of "agent" versus "human" — only whether a session is unclaimed or held by a specific actor:

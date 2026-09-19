@@ -15,6 +15,17 @@ Q: Why not just have the agent run `ssh user@host "cmd"` per command?
 A: Loses shell state (cwd, env, an authenticated session) between commands, and gives
 no way to supply interactive input at all.
 
+Q: Without `agent-tmux`, how do AI coding tools (Claude CLI, Copilot CLI, Copilot in
+the IDE) run shell commands today?
+A: None attach a human to a real shared PTY by default. Each tool call is typically a
+fresh, non-PTY subprocess (or, at best, a backgrounded shell reused per session id for
+cwd/env persistence, purely as harness bookkeeping — not a terminal). Consequences:
+no controlling terminal, so TTY-only prompts (`sudo`, `ssh` password/TOTP) fail or
+hang; no way for a human to watch or type into that exact process; an IDE's "run in
+terminal" may open a real terminal tab, but it's a separate surface from what the
+agent reads, so handoff means switching tabs/focus, not one shared pane. This is
+precisely the gap `agent-tmux` fills.
+
 ## Requirements
 
 Q: Must the human use special client software?
@@ -26,6 +37,13 @@ watch/control in place.
 
 Q: Can the agent ever see the secret being typed?
 A: No. Human keystroke → PTY directly, never through chat or a tool call.
+
+Q: Does this hide *all* secrets from the agent forever (e.g. ones later printed by
+commands)?
+A: No — explicitly out of scope. It only keeps secret keystrokes out of the scripted
+input channel at the moment of entry. Ordinary command output the agent legitimately
+reads afterward (`kubectl get secret -o yaml`, `env`, a decoded config file) can still
+contain secrets; that's not a bug or a gap this design tries to close.
 
 Q: Must this be SSH-specific?
 A: No — any interactive program (`ssh`, `sudo -i`, `gdb`, `vim`, `kubectl exec`,
@@ -149,6 +167,14 @@ which briefly hold an ownership claim.
   automation process, so repeated `open`/`take` calls consistently show the same id).
   If unset, a fresh `$USER-<8 random hex chars>` is generated **per process** — fine for
   one-off use, but won't be stable across separate invocations.
+- **Recommended id shape**: `<tool>-<host>-<user>-<instance-token>` (e.g.
+  `copilot-cli-devbox-siva-4f2a`), set once at the start of a run and reused for every
+  call in that run. `tool` and `host` disambiguate *which* client is which when two
+  similar clients (same tool, same host, same user) are active — a bare `$USER` or a
+  bare tool name alone can't tell them apart. `instance-token` is a short id generated
+  once per run (not regenerated per call, and never shared as a fixed value across
+  concurrently running instances of the same tool) so concurrent instances don't
+  collide on an identical id.
 - **`@agent-tmux-owner-tty`**: best-effort, kernel-verified corroborating evidence
   (`/proc/self/fd/0` symlink target) recorded alongside the self-reported actor id, for
   an audit trail. Not used for enforcement, just visibility.
@@ -244,15 +270,50 @@ A companion `SKILL.md` teaches an AI agent to route **all** shell work through
 
 - Assume `agent-tmux` is already installed and on `PATH`. **Never build it** from the
   skill (this was an explicit correction — the skill used to try `make build`).
+- Set `AGENT_TMUX_ACTOR_ID` once per run using the `<tool>-<host>-<user>-<instance-token>`
+  shape from §6, so `status` can tell apart two similar clients.
 - Use `run` for anything expected to finish; `send`/`key` for interactive/long-lived
   programs; `screen`/`wait` to observe.
-- On any password/passphrase/TOTP/hardware-key/approval prompt: stop sending input
-  immediately, tell the user to run `agent-tmux open <session>`, have them press
-  `Ctrl-T`, type the secret, press `Ctrl-T` again — never ask for the secret in chat or
-  through any tool call.
 - Check `status` before calling `send`/`run`/`key`; if `owner` isn't `(unclaimed)`,
   something else currently holds the write lock — don't send input, surface who owns
   it instead.
+- On a stall, classify what's on screen before reacting, rather than treating every
+  stall identically:
+  - Credential/secret prompts (password/passphrase/TOTP/hardware-key) → **silently
+    yield**: stop sending input, tell the user to run `agent-tmux open <session>`,
+    have them press `Ctrl-T`, type the secret, press `Ctrl-T` again — never ask for the
+    secret in chat or through any tool call, and never ask permission first since this
+    is expected/procedural.
+  - Consequential/destructive confirmations (`yes/no`, `[y/N]`, "are you sure",
+    unfamiliar host-key trust prompts) or any unrecognized stall → **seek
+    confirmation**: surface the exact prompt text to the user in chat and ask what to
+    answer, rather than assuming it's safe to proceed or that it's a secret. A plain
+    non-secret answer may be relayed via `send` if the user is comfortable with that;
+    otherwise fall back to the same `open`+`Ctrl-T` handoff.
+
+Beyond the skill (advisory, for any agent doing routine shell work), the `agents/`
+directory in this repo ships ready-made, tool-specific **custom agent** definitions —
+all named `investigator` — for dedicated, higher-stakes work (e.g. a human explicitly
+invoking a production-incident investigator): `investigator.vscode.agent.md`,
+`investigator.copilot-cli.agent.md`, `investigator.claude.md`. Each embeds the same
+command-classification and prompt-handling rules as a self-contained agent persona
+using that tool's own frontmatter schema and tool names, since VS Code/Copilot CLI
+share one `.agent.md` schema (different tool namespaces) while Claude Code uses its
+own `.claude/agents/*.md` format. See README.md's "Agent Integration" section for
+install locations.
+
+Q: How does someone actually install `SKILL.md` and the `investigator` agent, rather
+than just having the source files sit in this repo?
+A: `make install-skill` / `make install-agents` / `make install-integration` (both).
+These `ln -sf` the files from this repo into each tool's real config location
+(`~/.claude/skills/agent-tmux/SKILL.md`, `~/.copilot/skills/agent-tmux/SKILL.md`,
+`~/.config/Code/User/prompts/investigator.agent.md`, `~/.copilot/agents/investigator.agent.md`,
+`~/.claude/agents/investigator.md`) — symlinked, not copied, so a `git pull` here keeps
+every installed copy current with no manual re-sync step. Both skill dirs
+(`~/.claude/skills/`, `~/.copilot/skills/`) use the shared, cross-tool SKILL.md
+standard's folder-per-skill layout (`<skills-dir>/agent-tmux/SKILL.md`), confirmed
+against Claude Code's and GitHub Copilot's own skills documentation — this repo had no
+install path documented for either the skill or the agents before this was added.
 
 ## 11. How To Rebuild This, In Order
 
