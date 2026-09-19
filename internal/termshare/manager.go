@@ -27,6 +27,10 @@ var (
 	// ErrControlled is wrapped with the actual actor id holding control;
 	// check with errors.Is and read the message for who it is.
 	ErrControlled = errors.New("another actor controls the terminal; wait until they release it or run agent-tmux yield")
+	// rcPattern matches the [RC:exitCode:seq] block prepended to PS1 by setupPS1.
+	// The seq counter increments with each prompt draw, making completion detection
+	// reliable even when exit code and working directory are unchanged.
+	rcPattern = regexp.MustCompile(`\[RC:(\d+):(\d+)\]`)
 )
 
 // statusRightFormat renders a banner naming the actor that currently owns
@@ -108,7 +112,7 @@ func (m *Manager) Create(ctx context.Context, name, shell string, cols, rows int
 		return errors.New("shell cannot be empty")
 	}
 
-	return m.withLock("create", func() error {
+	if err := m.withLock("create", func() error {
 		exists, err := m.HasSession(ctx, name)
 		if err != nil {
 			return err
@@ -144,7 +148,10 @@ func (m *Manager) Create(ctx context.Context, name, shell string, cols, rows int
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	return m.setupPS1(ctx, name)
 }
 
 func (m *Manager) HasSession(ctx context.Context, name string) (bool, error) {
@@ -254,14 +261,16 @@ func (m *Manager) RunCommand(ctx context.Context, name, command string, timeout 
 		return RunResult{}, errors.New("history must not be negative")
 	}
 
-	tokenBytes := make([]byte, 12)
-	if _, err := rand.Read(tokenBytes); err != nil {
-		return RunResult{}, fmt.Errorf("create completion token: %w", err)
+	screenBefore, err := m.Screen(ctx, name, history)
+	if err != nil {
+		return RunResult{}, err
 	}
-	token := hex.EncodeToString(tokenBytes)
-	marker := "__AGENT_TMUX_DONE_" + token + ":"
-	payload := "eval " + shellQuote(command) + "; __agent_tmux_status=$?; printf '\\n__AGENT_TMUX_DONE_%s:%s\\n' " + shellQuote(token) + " \"$__agent_tmux_status\""
-	if err := m.Send(ctx, name, payload, true); err != nil {
+	seqBefore := -1
+	if m := rcPattern.FindStringSubmatch(screenBefore); m != nil {
+		seqBefore, _ = strconv.Atoi(m[2])
+	}
+
+	if err := m.Send(ctx, name, command, true); err != nil {
 		return RunResult{}, err
 	}
 
@@ -271,24 +280,21 @@ func (m *Manager) RunCommand(ctx context.Context, name, command string, timeout 
 	defer ticker.Stop()
 	var screen string
 	for {
-		var err error
 		screen, err = m.Screen(ctx, name, history)
 		if err != nil {
 			return RunResult{Screen: screen}, err
 		}
-		if markerIndex := strings.LastIndex(screen, marker); markerIndex >= 0 {
-			statusStart := markerIndex + len(marker)
-			statusEnd := strings.IndexByte(screen[statusStart:], '\n')
-			if statusEnd < 0 {
-				statusEnd = len(screen) - statusStart
+		all := rcPattern.FindAllStringSubmatch(screen, -1)
+		if len(all) > 0 {
+			last := all[len(all)-1]
+			seq, _ := strconv.Atoi(last[2])
+			if seq > seqBefore {
+				exitCode, parseErr := strconv.Atoi(last[1])
+				if parseErr != nil {
+					return RunResult{Screen: screen}, fmt.Errorf("parse command exit status %q: %w", last[1], parseErr)
+				}
+				return RunResult{Screen: screen, ExitCode: exitCode}, nil
 			}
-			statusText := strings.TrimSpace(screen[statusStart : statusStart+statusEnd])
-			exitCode, parseErr := strconv.Atoi(statusText)
-			if parseErr != nil {
-				return RunResult{Screen: screen}, fmt.Errorf("parse command exit status %q: %w", statusText, parseErr)
-			}
-			cleanScreen := screen[:markerIndex] + screen[statusStart+statusEnd:]
-			return RunResult{Screen: cleanScreen, ExitCode: exitCode}, nil
 		}
 		select {
 		case <-ctx.Done():
@@ -296,6 +302,16 @@ func (m *Manager) RunCommand(ctx context.Context, name, command string, timeout 
 		case <-ticker.C:
 		}
 	}
+}
+
+// setupPS1 prepends [RC:$?:seq] to the shell's PS1 so RunCommand can detect
+// command completion via the prompt without sentinel injection. _ATSEQ increments
+// on every prompt draw, making completion detection reliable even when the exit
+// code and working directory are unchanged between two consecutive commands.
+// The keystrokes are buffered by the PTY and processed by the shell before any
+// subsequent RunCommand arrives, so no confirmation wait is needed here.
+func (m *Manager) setupPS1(ctx context.Context, name string) error {
+	return m.Send(ctx, name, `_ATSEQ=0; export PS1='[RC:$?:$((_ATSEQ++))]'"${PS1}"`, true)
 }
 
 func (m *Manager) WaitFor(ctx context.Context, name, text string, timeout time.Duration, history int) (string, error) {
