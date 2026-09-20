@@ -18,7 +18,7 @@ import (
 )
 
 // OwnerUnclaimed means no attached client currently holds input, so
-// scripted Send/SendKeys/RunCommand calls are allowed. Any other value is
+// scripted Send/SendKeys calls are allowed. Any other value is
 // the actor id of whoever last claimed control via Open or Take.
 const OwnerUnclaimed = ""
 
@@ -27,10 +27,6 @@ var (
 	// ErrControlled is wrapped with the actual actor id holding control;
 	// check with errors.Is and read the message for who it is.
 	ErrControlled = errors.New("another actor controls the terminal; wait until they release it or run agent-tmux yield")
-	// rcPattern matches the [RC:exitCode:seq] block prepended to PS1 by setupPS1.
-	// The seq counter increments with each prompt draw, making completion detection
-	// reliable even when exit code and working directory are unchanged.
-	rcPattern = regexp.MustCompile(`\[RC:(\d+):(\d+)\]`)
 )
 
 // statusRightFormat renders a banner naming the actor that currently owns
@@ -51,11 +47,6 @@ type Session struct {
 	Clients int
 	Command string
 	Path    string
-}
-
-type RunResult struct {
-	Screen   string
-	ExitCode int
 }
 
 type Manager struct {
@@ -112,7 +103,7 @@ func (m *Manager) Create(ctx context.Context, name, shell string, cols, rows int
 		return errors.New("shell cannot be empty")
 	}
 
-	if err := m.withLock("create", func() error {
+	return m.withLock("create", func() error {
 		exists, err := m.HasSession(ctx, name)
 		if err != nil {
 			return err
@@ -148,10 +139,7 @@ func (m *Manager) Create(ctx context.Context, name, shell string, cols, rows int
 			}
 		}
 		return nil
-	}); err != nil {
-		return err
-	}
-	return m.setupPS1(ctx, name)
+	})
 }
 
 func (m *Manager) HasSession(ctx context.Context, name string) (bool, error) {
@@ -248,70 +236,6 @@ func (m *Manager) SendKeys(ctx context.Context, name string, keys []string) erro
 		_, err := m.run(ctx, nil, args...)
 		return err
 	})
-}
-
-func (m *Manager) RunCommand(ctx context.Context, name, command string, timeout time.Duration, history int) (RunResult, error) {
-	if strings.TrimSpace(command) == "" {
-		return RunResult{}, errors.New("command cannot be empty")
-	}
-	if timeout <= 0 {
-		return RunResult{}, errors.New("timeout must be positive")
-	}
-	if history < 0 {
-		return RunResult{}, errors.New("history must not be negative")
-	}
-
-	screenBefore, err := m.Screen(ctx, name, history)
-	if err != nil {
-		return RunResult{}, err
-	}
-	seqBefore := -1
-	if m := rcPattern.FindStringSubmatch(screenBefore); m != nil {
-		seqBefore, _ = strconv.Atoi(m[2])
-	}
-
-	if err := m.Send(ctx, name, command, true); err != nil {
-		return RunResult{}, err
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	var screen string
-	for {
-		screen, err = m.Screen(ctx, name, history)
-		if err != nil {
-			return RunResult{Screen: screen}, err
-		}
-		all := rcPattern.FindAllStringSubmatch(screen, -1)
-		if len(all) > 0 {
-			last := all[len(all)-1]
-			seq, _ := strconv.Atoi(last[2])
-			if seq > seqBefore {
-				exitCode, parseErr := strconv.Atoi(last[1])
-				if parseErr != nil {
-					return RunResult{Screen: screen}, fmt.Errorf("parse command exit status %q: %w", last[1], parseErr)
-				}
-				return RunResult{Screen: screen, ExitCode: exitCode}, nil
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return RunResult{Screen: screen}, fmt.Errorf("command is still running or waiting for input: %w", ctx.Err())
-		case <-ticker.C:
-		}
-	}
-}
-
-// setupPS1 prepends [RC:$?:seq] to the shell's PS1 so RunCommand can detect
-// command completion via the prompt without sentinel injection. _ATSEQ increments
-// on every prompt draw, making completion detection reliable even when the exit
-// code and working directory are unchanged between two consecutive commands.
-// The keystrokes are buffered by the PTY and processed by the shell before any
-// subsequent RunCommand arrives, so no confirmation wait is needed here.
-func (m *Manager) setupPS1(ctx context.Context, name string) error {
-	return m.Send(ctx, name, `_ATSEQ=0; export PS1='[RC:$?:$((_ATSEQ++))]'"${PS1}"`, true)
 }
 
 func (m *Manager) WaitFor(ctx context.Context, name, text string, timeout time.Duration, history int) (string, error) {
@@ -477,7 +401,7 @@ func (m *Manager) Kill(ctx context.Context, name string) error {
 }
 
 // claim records actorID (and its best-effort tty, for the audit trail) as
-// the session's owner, so scripted Send/SendKeys/RunCommand calls are
+// the session's owner, so scripted Send/SendKeys calls are
 // refused until release runs.
 func (m *Manager) claim(ctx context.Context, name, actorID, tty string) error {
 	if actorID == "" {

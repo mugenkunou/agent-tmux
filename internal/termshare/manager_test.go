@@ -3,7 +3,6 @@ package termshare
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -29,16 +28,12 @@ func TestSessionLifecycleAndControlHandoff(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = manager.Kill(context.Background(), name) })
 
-	result, err := manager.RunCommand(ctx, name, `cd /tmp`, 5*time.Second, 100)
-	if err != nil || result.ExitCode != 0 {
-		t.Fatalf("change directory: result=%+v err=%v", result, err)
-	}
-	result, err = manager.RunCommand(ctx, name, `printf 'STATE:%s\n' "$PWD"`, 5*time.Second, 100)
-	if err != nil {
+	if err := manager.Send(ctx, name, `cd /tmp && printf 'STATE:%s\n' "$PWD"`, true); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Screen, "STATE:/tmp") {
-		t.Fatalf("shell state did not persist; screen:\n%s", result.Screen)
+	screen, err := manager.WaitFor(ctx, name, "STATE:/tmp", 5*time.Second, 100)
+	if err != nil {
+		t.Fatalf("shell state did not persist: %v; screen:\n%s", err, screen)
 	}
 
 	if err := manager.claim(ctx, name, "test-actor", ""); err != nil {
@@ -55,33 +50,6 @@ func TestSessionLifecycleAndControlHandoff(t *testing.T) {
 	}
 	if _, err := manager.WaitFor(ctx, name, "YIELDED_OK", 5*time.Second, 100); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestRunCommandReturnsExitStatus(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux is not installed")
-	}
-	t.Setenv("AGENT_TMUX_RUNTIME_DIR", shortRuntimeDir(t))
-	manager, err := NewManager()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	name := fmt.Sprintf("exit-status-%d", time.Now().UnixNano())
-	if err := manager.Create(ctx, name, "/bin/bash", 80, 24); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = manager.Kill(context.Background(), name) })
-
-	result, err := manager.RunCommand(ctx, name, "false", 5*time.Second, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.ExitCode != 1 {
-		t.Fatalf("exit code = %d, want 1", result.ExitCode)
 	}
 }
 

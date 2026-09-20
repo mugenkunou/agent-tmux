@@ -41,19 +41,17 @@ A scripted caller creates one Bash session:
 agent-tmux create work
 ```
 
-Routine commands run synchronously and preserve shell state:
-
-```bash
-agent-tmux run work 'cd /srv/app'
-agent-tmux run work 'git status --short'
-```
-
 Interactive commands are started without waiting for them to exit:
 
 ```bash
 agent-tmux send work 'ssh deploy@prod'
 agent-tmux screen --history 100 work
 ```
+
+Every command is sent the same way, whether it's a routine local command or one
+running deep inside an SSH/sudo session: `send` the text, then `screen`/`wait` to see
+what happened. There's no separate "run and wait for the exit code" fast path — see
+[PROJECT.md §14](PROJECT.md#14-why-there-is-no-run-command) for why.
 
 Someone can observe and take over from a real terminal, with a single key:
 
@@ -113,8 +111,7 @@ agent-tmux kill work
 | Command | Purpose |
 | --- | --- |
 | `create` | Start a persistent Bash session |
-| `run` | Run a routine command and wait for its exit status |
-| `send` | Send text, useful for interactive programs |
+| `send` | Send text, useful for routine commands and interactive programs alike |
 | `key` | Send keys such as `C-c`, `C-z`, or `Escape` |
 | `screen` | Read the current rendered terminal |
 | `wait` | Wait until expected text appears |
@@ -124,8 +121,6 @@ agent-tmux kill work
 | `yield` | Clear the current owner |
 | `status` / `list` | Inspect sessions and their current owner |
 | `kill` | Terminate a session |
-
-`run` does not cancel a command when its timeout expires. This is intentional: the process may be waiting for interactive input. Inspect it with `screen`, then use `open` or `take` when needed.
 
 `open` currently needs one `Ctrl-T` before `Ctrl-Q` if the session is unclaimed, since tmux discards any bound command chain other than a bare `detach-client`/`switch-client` while a client is read-only — `Ctrl-Q` sets the quit flag as part of a chain, which only reliably fires once the client is writable.
 
@@ -181,7 +176,7 @@ There is no built-in notion of "agent" versus "human" — only whether a session
 
 - Any number of clients may read concurrently.
 - `watch` is enforced read-only by tmux; `open` starts the same way, using tmux's native read-only client flag rather than a custom key table (an earlier key-table-swallow design was tried and empirically disproven: unbound keys were still forwarded to the pane).
-- Only the current owner may write through `agent-tmux`; scripted `send`/`run`/`key` calls are refused while any actor holds ownership (`status` shows who).
+- Only the current owner may write through `agent-tmux`; scripted `send`/`key` calls are refused while any actor holds ownership (`status` shows who).
 - `take` and `open`'s control phase atomically set the owner to an actor id before attaching.
 - Scripted writes attempted while someone else owns the session fail instead of being queued.
 - `Ctrl-T` is bound once, server-wide, to `detach-client` — the one command tmux still honors for a read-only client. `open` alternates read-only and writable `attach-session` calls around that single detach point, claiming/releasing ownership on each transition.
@@ -208,7 +203,7 @@ The tmux server owns the local Bash PTY, so the session survives every caller di
 make test
 ```
 
-The integration tests launch real tmux sessions and verify persistent shell state, command exit codes, and ownership-based write exclusion.
+The integration tests launch real tmux sessions and verify persistent shell state and ownership-based write exclusion.
 
 ### Secret scanning
 

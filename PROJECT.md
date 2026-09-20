@@ -5,6 +5,18 @@
 
 ## Problem
 
+Q: What is this tool for, fundamentally?
+A: Letting an AI agent and a human **co-work on the same remote-debugging session** —
+production incidents, SSH'd-into boxes, `sudo -i` shells, `kubectl exec`, interactive
+debuggers — not just running commands in a local terminal. Local, non-interactive
+command execution is the easy sub-case any subprocess call already handles; the
+reason this project exists is the case where the process behind the pane is
+frequently a *nested* remote shell, and a human may need to see or take over that
+exact shell at any moment. Any feature that only works for the local top-level shell
+and silently breaks once you're nested (SSH, sudo, a debugger) is failing at the
+actual point of this tool — see §14 for a concrete instance of that mistake and why
+it was reverted.
+
 Q: What problem does this tool solve?
 A: An AI agent runs a persistent Bash session and needs to run `ssh`/`sudo`/etc.
 When those need interactive input (password, TOTP), the agent must not see it — a
@@ -131,15 +143,13 @@ A: One private tmux server per user, its own socket
 normal tmux.
 
 Q: Does the agent hold a live tmux client?
-A: No. `send`/`run`/`key`/`screen`/`wait` are one-shot `tmux` CLI invocations that
+A: No. `send`/`key`/`screen`/`wait` are one-shot `tmux` CLI invocations that
 exit immediately. No persistent "agent" client exists.
 
-Q: What does `run` do to get a synchronous exit code out of an async terminal?
-A: Prepends `[RC:$?:$((_ATSEQ++))]` to the shell's PS1 once at session creation
-(`setupPS1`). For each `run` call: reads `seqBefore` from the last `[RC:X:Y]` in the
-current screen, sends the raw command (no wrapper), polls `capture-pane` every 100 ms
-until the last `[RC:X':Y']` has `Y' > seqBefore` — then `X'` is the exit code. See §13
-for the full evolution and the rejected alternatives.
+Q: Is there a synchronous "run and get the exit code" call?
+A: No — deliberately removed. See §14 for the full history (there used to be a
+`run` command backed by a `PS1` marker) and why every caller now uses
+`send` + `screen`/`wait` uniformly instead, local or nested.
 
 Q: How does `open` give one-tab, one-key handoff?
 A: Loop: `attach -r` (blocks typing) → `Ctrl-T` → `detach-client` fires (always
@@ -171,7 +181,7 @@ No "agent" or "human" role is hardcoded anywhere. There are only **callers**, so
 which briefly hold an ownership claim.
 
 - **`@agent-tmux-owner`** (tmux session option): empty string = **unclaimed** (any
-  scripted `send`/`run`/`key` call is allowed). Non-empty = the **actor id** of whoever
+  scripted `send`/`key` call is allowed). Non-empty = the **actor id** of whoever
   currently holds the write lock; all scripted calls are refused
   (`ErrControlled`, wrapping the actor id in the error message) until it clears.
 - **Actor id** (`actorID()`): read from `AGENT_TMUX_ACTOR_ID` if the caller set it
@@ -284,9 +294,10 @@ A companion `SKILL.md` teaches an AI agent to route **all** shell work through
   skill (this was an explicit correction — the skill used to try `make build`).
 - Set `AGENT_TMUX_ACTOR_ID` once per run using the `<tool>-<host>-<user>-<instance-token>`
   shape from §6, so `status` can tell apart two similar clients.
-- Use `run` for anything expected to finish; `send`/`key` for interactive/long-lived
-  programs; `screen`/`wait` to observe.
-- Check `status` before calling `send`/`run`/`key`; if `owner` isn't `(unclaimed)`,
+- Use `send` for every command — routine or interactive/long-lived — followed by
+  `screen`/`wait` to observe the result; there is no separate "run and get the exit
+  code" call (§14).
+- Check `status` before calling `send`/`key`; if `owner` isn't `(unclaimed)`,
   something else currently holds the write lock — don't send input, surface who owns
   it instead.
 - On a stall, classify what's on screen before reacting, rather than treating every
@@ -306,7 +317,7 @@ A companion `SKILL.md` teaches an AI agent to route **all** shell work through
 Q: While waiting for a human to finish typing a secret, should the agent keep calling
 `agent-tmux status` in a loop to detect release?
 A: No — explicitly corrected. Looping `status` calls burns turns/tool calls for no
-benefit (the human isn't necessarily fast, and `send`/`run`/`key` are refused the
+benefit (the human isn't necessarily fast, and `send`/`key` are refused the
 whole time regardless). Both `SKILL.md` and the `investigator` agents now instruct:
 stop and **end the turn** once yielding, and only check `status`/`screen` again after
 the user explicitly says they're done (e.g. "done", "continue") — the user's message
@@ -420,8 +431,9 @@ If you're starting from zero with only this file:
 1. Confirm `tmux` is installed; build a thin Go (or any language) CLI that always
    invokes `tmux` against one dedicated, mode-`0700` private socket.
 2. Implement `create` (new-session + the option defaults in §6/§7), `screen`,
-   `send`/`key` (fire-and-forget), and `run` (the completion-marker-and-poll trick in
-   §5) first — these don't require any attach/detach logic.
+   `send`/`key` (fire-and-forget), and `wait` (poll `capture-pane` for expected text)
+   first — these don't require any attach/detach logic. Do not implement a `run`
+   command backed by a PS1/prompt marker; see §14 for why that path is closed.
 3. Implement the ownership primitives (`claim`/`release`, the `@agent-tmux-owner*`
    options, `withAgentControl` refusing writes while claimed) before touching any
    attach logic.
@@ -539,3 +551,75 @@ Using `attach` by mistake leaves the user in a read-only session with no working
 key. Recovery: press `Ctrl-B d` (standard tmux detach, always honored in read-only),
 then re-run with `agent-tmux open <session>` instead. Do not document `attach` as a
 user-facing command in SKILL.md or any agent-facing guide.
+
+## 14. Why There Is No `run` Command
+
+Q: What is this project actually for — a local terminal convenience, or something
+else?
+A: **agent-tmux exists for agents and humans to co-work on remote debugging
+sessions** — production incidents, SSH'd-into boxes, `sudo -i` shells, `kubectl exec`,
+debuggers, anything where the process a human might need to see or take over is
+frequently *not* the local shell agent-tmux started, but something nested several
+hops inside it. Local-only command execution was never the point; if that were the
+whole problem, a plain subprocess would suffice and this tool wouldn't exist. Any
+design decision that only works for the local top-level shell and silently degrades
+once you `ssh` in is a bug against the actual purpose of this project, not an
+acceptable edge case.
+
+Q: What was `run`, and why did it exist?
+A: `RunCommand` (CLI: `agent-tmux run <session> '<cmd>'`) was a single-call
+convenience: send a command, poll the screen for a `[RC:$?:seq]` marker injected into
+the shell's `PS1` (§13), and return the exit code once a newer marker appeared. It
+existed so a caller didn't have to separately `send` + `wait`/`screen` for the common
+case of an ordinary, quick, local command.
+
+Q: What was the actual flaw, and why does it matter for this project specifically?
+A: `setupPS1` (§13) is sent exactly once, to the **local** shell, at `Create` time. It
+is a property of that one shell process — not of "whatever program currently has the
+pane." The instant a caller `send`s `ssh user@host` (or `sudo -i`, or anything that
+execs into a different shell), the pane is now driven by a shell that never received
+that `export PS1=...`. `run`'s marker never reappears, so every subsequent `run` call
+against that session times out with "command is still running or waiting for input"
+— even though the remote command completed instantly. Since this project's entire
+reason to exist is exactly that nested-shell case (SSH/sudo/debugger sessions during
+remote debugging), a mechanism that quietly stops working the moment you're inside
+one is not a minor gap — it fails on the primary use case, not an edge case.
+
+Q: Why not just re-inject the same PS1 marker into the remote shell after `ssh`
+completes?
+A: Considered and rejected. It would need to detect "a new shell just started" (no
+reliable, generic signal for that over a raw PTY — see §13's rejected "prompt
+detection via existing PS1"), then re-run `setupPS1` remotely, then keep track of
+*which* shell in the nesting stack is the "current" one so `run` polls the right
+marker generation. That's meaningfully more state and more failure modes (what if the
+re-injection races the login banner? what if the remote shell isn't bash?) in service
+of preserving one convenience call. Simpler to remove the assumption entirely than to
+keep patching around it.
+
+Q: So what replaces `run`?
+A: Nothing — by design. Every caller (agent or human-authored script) uses the same
+two primitives for every command, local or nested: `send` the text, then
+`screen`/`wait --contains <expected-text>` to read the result. If the exit code
+matters, `send 'echo $?'` as its own follow-up and read it off `screen`. This is
+exactly what a human already does when watching a shared terminal — there's nothing
+for a monitoring tool to flag, and nothing that assumes anything about which shell,
+local or remote, is currently attached to the pane.
+
+Q: Doesn't this make every command more expensive (two calls instead of one, and a
+polling/settle heuristic instead of a hard completion signal)?
+A: Yes, and that's an accepted, deliberate cost. A single unified mechanism that is
+*correct* in the primary use case (remote, nested shells) is worth more than a faster
+mechanism that is *wrong* in exactly that case. `wait --contains` already requires the
+caller to know something about expected output — true for interactive commands
+today, and no worse for routine ones. Where output is unpredictable, polling `screen`
+until it stops changing is the same judgment call a human watching the pane would
+make; it is a heuristic, not a guarantee, but it never silently returns a wrong
+answer the way `run` did once nested.
+
+Q: Does removing `run` change the ownership/ACL rules?
+A: No. `send`/`key` are still refused while another actor holds ownership, exactly as
+`send`/`run`/`key` were before. Removing `run` only removes the PS1 injection
+(`setupPS1`, the `[RC:...]` regex, and the `RunResult`/exit-code plumbing) and the
+`run` CLI verb; `Create` no longer touches `PS1` at all, so a freshly created
+session's prompt is whatever the user's own shell config would normally produce —
+one less thing agent-tmux changes about the environment it's given.

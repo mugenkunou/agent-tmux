@@ -28,7 +28,8 @@ Code terminal and never a raw `ssh`/`sudo` invocation outside of it. Assume
 ## Command Classification
 
 Every command you propose is either READ-ONLY or READ-WRITE. Classify before running
-it via `agent-tmux run <session> '<cmd>'`.
+it via `agent-tmux send <session> '<cmd>'` (followed by `screen`/`wait` to read the
+result — see Execution Rules).
 
 **READ-ONLY** — inspects state without modifying anything:
 - File/dir listing and reading: `ls`, `cat`, `head`, `tail`, `less`, `find`, `stat`, `file`
@@ -53,13 +54,16 @@ it via `agent-tmux run <session> '<cmd>'`.
 
 ## Execution Rules
 
-Before every `agent-tmux send`/`run`/`key`, check `agent-tmux status <session>`. If
+Before every `agent-tmux send`/`key`, check `agent-tmux status <session>`. If
 `owner` is not `(unclaimed)`, some other caller currently holds control — do not send
 input; report the current owner to the user instead.
 
 **READ-ONLY commands:** run directly via `execute/runInTerminal` typing
-`agent-tmux run <session> '<cmd>'`. Don't ask for permission in chat first. State the
-goal in one line, make the call, interpret the result.
+`agent-tmux send <session> '<cmd>'`, then `agent-tmux screen`/`wait --contains ...` to
+read the result — there is no `run` call that returns an exit code in one step (see
+`PROJECT.md` §14). Don't ask for permission in chat first. State the goal in one
+line, make the call, interpret the result. If the exit code matters, follow up with
+`agent-tmux send <session> 'echo $?'`.
 
 **READ-WRITE commands:** before running, ask in chat for:
 - The exact command you intend to run
@@ -102,12 +106,14 @@ Not every stall means the same thing.
 ## SSH / Remote Access
 
 1. Elicit username and host before the first `agent-tmux` call, if not already given.
-2. Use `agent-tmux send <session> 'ssh user@host'` (interactive) — never `run` — for
-   SSH and anything else long-lived.
+2. Use `agent-tmux send <session> 'ssh user@host'` for SSH and anything else
+   long-lived — the same primitive used for every other command in this session.
 3. Wait for the prompt with `agent-tmux wait --contains ... <session>`, then classify
    per the section above (password/host-key prompt vs. a clean shell).
 4. Once connected, verify identity with a single RO check:
-   `agent-tmux run <session> 'hostname && whoami && pwd'`.
+   `agent-tmux send <session> 'hostname && whoami && pwd'`, then `screen` to read it.
+   The remote shell has no `PS1` marker of its own, so completion detection here
+   works the same way it does locally: `wait`/`screen`, never `run`.
 5. All subsequent commands go into the same session. Validate continuity from prior
    `screen` output before each call; if the prompt format changed or output suggests
    a different host/user, stop and ask.
@@ -127,7 +133,7 @@ For RW commands:
 - **Awaiting your go-ahead.**
 
 Don't write commands in prose or fenced blocks expecting the user to copy them — the
-command goes into the `agent-tmux run`/`send` call.
+command goes into the `agent-tmux send` call.
 
 ## Finish
 

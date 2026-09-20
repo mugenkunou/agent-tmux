@@ -40,8 +40,6 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return screen(ctx, manager, args[1:], stdout, stderr)
 	case "send":
 		return send(ctx, manager, args[1:], stdout, stderr)
-	case "run":
-		return runCommand(ctx, manager, args[1:], stdout, stderr)
 	case "key":
 		return key(ctx, manager, args[1:], stdout, stderr)
 	case "wait":
@@ -166,30 +164,6 @@ func send(ctx context.Context, manager *termshare.Manager, args []string, stdout
 	return 0
 }
 
-func runCommand(ctx context.Context, manager *termshare.Manager, args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("run", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	timeout := flags.Duration("timeout", 30*time.Second, "maximum wait; timeout leaves the command running")
-	history := flags.Int("history", 500, "scrollback lines returned")
-	if err := flags.Parse(args); err != nil {
-		return 2
-	}
-	if flags.NArg() < 2 {
-		fmt.Fprintln(stderr, "usage: agent-tmux run [--timeout 30s] <session> <shell-command>")
-		return 2
-	}
-	name := flags.Arg(0)
-	command := strings.Join(flags.Args()[1:], " ")
-	result, err := manager.RunCommand(ctx, name, command, *timeout, *history)
-	if result.Screen != "" {
-		fmt.Fprint(stdout, result.Screen)
-	}
-	if err != nil {
-		return fail(stderr, err)
-	}
-	return result.ExitCode
-}
-
 func key(ctx context.Context, manager *termshare.Manager, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 2 {
 		fmt.Fprintln(stderr, "usage: agent-tmux key <session> <key> [key ...]")
@@ -255,7 +229,7 @@ func yield(ctx context.Context, manager *termshare.Manager, args []string, stdou
 	if err := manager.Yield(ctx, args[0]); err != nil {
 		return fail(stderr, err)
 	}
-	fmt.Fprintf(stdout, "%s is unclaimed; scripted send/run calls are allowed again\n", args[0])
+	fmt.Fprintf(stdout, "%s is unclaimed; scripted send calls are allowed again\n", args[0])
 	return 0
 }
 
@@ -317,7 +291,6 @@ Usage:
   agent-tmux status <session>
   agent-tmux screen [--history N] <session>
   agent-tmux send [--no-enter] <session> <text>
-	agent-tmux run [--timeout 30s] <session> <shell-command>
   agent-tmux key <session> <key> [key ...]
   agent-tmux wait --contains <text> [--timeout 30s] <session>
   agent-tmux watch <session>       # read-only attachment

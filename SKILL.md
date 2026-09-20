@@ -30,28 +30,60 @@ This protects the terminal's live input channel at the moment something needs a 
 
    It attaches once, in the same terminal tab, starting unclaimed (watch-only). Pressing `Ctrl-T` claims control instantly for whoever is attached; pressing `Ctrl-T` again releases it. `Ctrl-Q` exits `open` and returns their terminal to a normal prompt without ending the session (press `Ctrl-T` first if currently watching). No second tab and no separate `take`/`yield` commands are needed for routine handoffs.
 
-## Routine Commands
+## Running Commands
 
-Use `run` for commands expected to finish:
+There is one mechanism for every command — routine or interactive, local or nested
+inside `ssh`/`sudo -i`/`gdb` — because it never assumes anything about the shell on
+the other end of the pane: send text, then read the screen back.
 
 ```bash
-agent-tmux run <session> 'cd /path/to/repository'
-agent-tmux run <session> 'git status --short'
+agent-tmux send <session> 'cd /path/to/repository && git status --short'
+agent-tmux screen --history 100 <session>
 ```
 
-`run` executes in the existing Bash, so `cd`, exported variables, functions, and authentication state persist. Its exit code is the command exit code.
+`send` executes in the existing Bash (or whatever program currently has the pane —
+including a remote shell after `ssh`), so `cd`, exported variables, functions, and
+authentication state persist.
 
-If `run` times out, it leaves the process running. Inspect before acting:
+To wait for a command to finish before reading its output, wait for text you know the
+command (or its final output) will produce, rather than guessing a fixed delay:
+
+```bash
+agent-tmux wait --contains 'nothing to commit' --timeout 30s <session>
+```
+
+If you don't know what the command will print, poll `screen` a couple of times a
+short interval apart and proceed once the output has stopped changing — the same
+judgment call a human watching the pane would make.
+
+If the exit code matters, ask for it as its own follow-up command — this is
+indistinguishable from a human checking `$?` themselves, so it never looks out of
+place on a shared/monitored terminal:
+
+```bash
+agent-tmux send <session> 'echo $?'
+agent-tmux screen --history 20 <session>
+```
+
+There is no `run` command that returns an exit code in one call. See
+`PROJECT.md` §14 for why: any such fast path would have to assume something about the
+shell's prompt or environment (e.g. a `PS1` marker), and that assumption silently
+breaks the moment the pane is running a **remote** shell instead of the local one —
+exactly the case this tool exists for. `send` + `screen`/`wait` has no such
+assumption, so it's correct in both a local shell and three `ssh` hops deep.
+
+If a command doesn't finish within a reasonable wait, inspect before acting:
 
 ```bash
 agent-tmux screen --history 200 <session>
 ```
 
-Do not immediately retry a timed-out command; duplicate input may reach the wrong prompt.
+Do not immediately retry a stalled command; duplicate input may reach the wrong prompt.
 
 ## Interactive Commands
 
-Use `send` when the command opens an interactive or long-lived program:
+The same `send` primitive starts interactive or long-lived programs — there is no
+separate mode to switch into:
 
 ```bash
 agent-tmux send <session> 'ssh user@host'
@@ -74,7 +106,7 @@ agent-tmux key <session> C-c
 
 ## Recognizing When the Terminal Needs a Human
 
-Before every `send`/`run`/`key`, check `agent-tmux status <session>` first. If `owner` is not `(unclaimed)`, some other caller currently holds control — do not send input; report the current owner to the user instead.
+Before every `send`/`key`, check `agent-tmux status <session>` first. If `owner` is not `(unclaimed)`, some other caller currently holds control — do not send input; report the current owner to the user instead.
 
 Not every stall means the same thing, so classify before reacting:
 
@@ -106,7 +138,7 @@ Not every stall means the same thing, so classify before reacting:
    3. Tell them to press `Ctrl-T` to claim control, type the value directly, then press `Ctrl-T` again to release.
    4. Never request the secret in chat or relay it through any tool call.
    5. Stop here and end your turn. Do **not** poll `agent-tmux status <session>` in a
-      loop waiting for release — while owner is set, `send`/`run`/`key` are refused
+      loop waiting for release — while owner is set, `send`/`key` are refused
       anyway, so looping only burns turns/tool calls without doing anything useful.
    6. Resume only when the user explicitly tells you they're done (e.g. "done",
       "continue", "go ahead") — treat that message, not a background retry, as the
