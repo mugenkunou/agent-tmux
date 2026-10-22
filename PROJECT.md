@@ -463,6 +463,21 @@ installed binary resolves and finds tmux/the socket correctly. `make install-ski
 and `make install-agents` were likewise run for real, not just dry-run-checked — the
 live symlinks listed in §10 are the proof.
 
+## 7b. Terminal Tab Title
+
+Q: How does the terminal tab show the session and ownership?
+A: tmux's `set-titles on` + `set-titles-string` (`titleFormat` in manager.go), applied
+on every attach so older sessions get it too. It is a tmux format keyed on
+`@agent-tmux-owner`, so it flips between `👀 ... (watching)` and `⌨️ ... (<actor>
+controls)` on claim/release with no extra code (same pattern as the status bar, §7).
+
+Q: Does tmux restore the old title on detach?
+A: No — verified with a real pty: no title reset or stack sequences were emitted on
+detach. So `Watch`/`Take`/`Open` push the title (`CSI 22;0 t`) before attaching and pop
+(`CSI 23;0 t`) after, only when stdout is a real terminal (never into pipes). `Open`
+pushes once around its whole loop, not per phase. Terminals without a title stack
+ignore these and keep the last agent-tmux title.
+
 ## 12b. Shell Completion (and why the CLI is a registry)
 
 Q: How is shell completion implemented?

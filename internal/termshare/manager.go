@@ -41,6 +41,15 @@ const statusRightFormat = " #{?#{==:#{@agent-tmux-owner},}" +
 	",#[bg=colour4]#[fg=black] OPEN - Ctrl-T takes control #[default]" +
 	",#[bg=colour2]#[fg=black] CONTROLLED BY #{@agent-tmux-owner} - Ctrl-T releases #[default]} "
 
+// titleFormat is the terminal tab/window title shown while attached, so the
+// right tab is findable among many and its state is visible without looking
+// at the status bar: an eye while unclaimed (watching), a keyboard while an
+// actor holds input. Like statusRightFormat it avoids commas outside the
+// conditional's own separators and uses no style tags.
+const titleFormat = "#{?#{==:#{@agent-tmux-owner},}" +
+	",\U0001F440 agent-tmux: #S (watching)" +
+	",\u2328\uFE0F agent-tmux: #S (#{@agent-tmux-owner} controls)}"
+
 type Session struct {
 	Name    string
 	Owner   string
@@ -269,6 +278,7 @@ func (m *Manager) Watch(ctx context.Context, name string) error {
 	if err := m.requireSession(ctx, name); err != nil {
 		return err
 	}
+	defer preserveTerminalTitle(os.Stdout)()
 	return m.attach(ctx, name, true)
 }
 
@@ -291,6 +301,7 @@ func (m *Manager) Open(ctx context.Context, name string, onPhase func(owner stri
 	if err := m.release(ctx, name); err != nil {
 		return err
 	}
+	defer preserveTerminalTitle(os.Stdout)()
 	if err := m.clearQuitFlag(ctx, name); err != nil {
 		return err
 	}
@@ -377,6 +388,7 @@ func (m *Manager) Take(ctx context.Context, name string) error {
 	if err := m.claim(ctx, name, id, tty); err != nil {
 		return err
 	}
+	defer preserveTerminalTitle(os.Stdout)()
 	attachErr := m.attach(ctx, name, false)
 	releaseErr := m.release(context.Background(), name)
 	if attachErr != nil {
@@ -485,7 +497,46 @@ func (m *Manager) requireSession(ctx context.Context, name string) error {
 	return nil
 }
 
+// Xterm window-manipulation sequences that push/pop the terminal's title on
+// its own stack (CSI 22;0 t / CSI 23;0 t). tmux sets the title while attached
+// but, under typical TERM values, never restores it on detach, so without this
+// the tab would keep saying "agent-tmux: ..." after the user has left. Terminals
+// that lack a title stack (or don't implement these) ignore them harmlessly,
+// leaving the title as it was before this change.
+const (
+	pushTitle = "\x1b[22;0t"
+	popTitle  = "\x1b[23;0t"
+)
+
+// preserveTerminalTitle saves the terminal's current title and returns a
+// function that restores it. It does nothing unless w is a real terminal, so
+// scripted callers and pipes never receive stray escape bytes.
+func preserveTerminalTitle(w *os.File) (restore func()) {
+	info, err := w.Stat()
+	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+		return func() {}
+	}
+	_, _ = w.WriteString(pushTitle)
+	return func() { _, _ = w.WriteString(popTitle) }
+}
+
+// applyTitle makes tmux set the attached terminal's title from titleFormat.
+// It is applied on every attach rather than only in Create so sessions made by
+// an older version pick it up too; set-option is idempotent. tmux re-expands
+// the format on redraw, so the title tracks ownership changes.
+func (m *Manager) applyTitle(ctx context.Context, name string) error {
+	for _, setting := range [][2]string{{"set-titles", "on"}, {"set-titles-string", titleFormat}} {
+		if _, err := m.run(ctx, nil, "set-option", "-t", exact(name), setting[0], setting[1]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *Manager) attach(ctx context.Context, name string, readOnly bool) error {
+	if err := m.applyTitle(ctx, name); err != nil {
+		return err
+	}
 	args := m.baseArgs()
 	args = append(args, "attach-session")
 	if readOnly {

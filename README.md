@@ -85,7 +85,12 @@ Someone can observe and take over from a real terminal, with a single key:
 agent-tmux open work
 ```
 
-`open` attaches once. It starts unclaimed: typed input does not reach the shell until someone claims it. Pressing `Ctrl-T` claims control instantly for whoever is attached; pressing `Ctrl-T` again releases it. `Ctrl-Q` ends `open` entirely and returns the terminal to a normal prompt, without killing the session — reattach later with `agent-tmux open work` again. No second tab and no detach chord to remember for routine handoffs.
+`open` attaches once. It starts unclaimed: typed input does not reach the shell until someone claims it. Pressing `Ctrl-T` claims control instantly for whoever is attached; pressing `Ctrl-T` again releases it. While attached, the terminal tab/window title shows which session it is and who has input —
+`👀 agent-tmux: work (watching)` or `⌨️ agent-tmux: work (<actor> controls)` — so the right
+tab is easy to find, and the previous title is restored when you leave. This relies on your
+terminal honoring title escape sequences (most do); the emoji need a font that renders them.
+
+`Ctrl-Q` ends `open` entirely and returns the terminal to a normal prompt, without killing the session — reattach later with `agent-tmux open work` again. No second tab and no detach chord to remember for routine handoffs.
 
 ```text
 UNCLAIMED work            CONTROLLED BY <actor> work

@@ -94,3 +94,59 @@ func shortRuntimeDir(t *testing.T) string {
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })
 	return directory
 }
+
+// The title must name the session and flip with ownership, and it must be set
+// through tmux's own format so it tracks claim/release without extra plumbing.
+func TestTitleFormatReflectsSessionAndOwnership(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	t.Setenv("AGENT_TMUX_RUNTIME_DIR", shortRuntimeDir(t))
+	manager, err := NewManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	const name = "titled"
+	if err := manager.Create(ctx, name, "/bin/bash", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Kill(context.Background(), name) })
+	if err := manager.applyTitle(ctx, name); err != nil {
+		t.Fatal(err)
+	}
+
+	expand := func() string {
+		out, err := manager.run(ctx, nil, "display-message", "-p", "-t", target(name), titleFormat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(out)
+	}
+	if got := expand(); !strings.Contains(got, "agent-tmux: titled") || !strings.Contains(got, "watching") {
+		t.Errorf("unclaimed title = %q", got)
+	}
+	if err := manager.claim(ctx, name, "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := expand(); !strings.Contains(got, "agent-tmux: titled") || !strings.Contains(got, "alice controls") {
+		t.Errorf("claimed title = %q", got)
+	}
+	if on, _ := manager.run(ctx, nil, "show-option", "-qv", "-t", exact(name), "set-titles"); strings.TrimSpace(on) != "on" {
+		t.Errorf("set-titles = %q, want on", on)
+	}
+}
+
+// Escape sequences must only ever go to a real terminal, never a pipe/file.
+func TestPreserveTerminalTitleIgnoresNonTerminals(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "out")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	preserveTerminalTitle(file)()
+	if info, _ := file.Stat(); info.Size() != 0 {
+		t.Errorf("wrote %d bytes to a non-terminal", info.Size())
+	}
+}
