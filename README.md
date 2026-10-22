@@ -41,6 +41,11 @@ A scripted caller creates one Bash session:
 agent-tmux create work
 ```
 
+Run from a real terminal, `create` also attaches immediately (identical to running
+`open` right after) — the session is on screen the moment it exists. Scripted callers
+(without a terminal) get the same behavior as before: the session is created detached
+and a hint to run `open` is printed.
+
 Interactive commands are started without waiting for them to exit:
 
 ```bash
@@ -110,7 +115,7 @@ agent-tmux kill work
 
 | Command | Purpose |
 | --- | --- |
-| `create` | Start a persistent Bash session |
+| `create` | Start a persistent Bash session; from a terminal, attaches immediately (same as `open`) |
 | `send` | Send text, useful for routine commands and interactive programs alike |
 | `key` | Send keys such as `C-c`, `C-z`, or `Escape` |
 | `screen` | Read the current rendered terminal |

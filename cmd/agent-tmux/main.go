@@ -49,7 +49,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	case "take":
 		return attach(ctx, manager, args[1:], false, stderr)
 	case "open":
-		return open(ctx, manager, args[1:], stdout, stderr)
+		return runOpen(ctx, manager, args[1:], stdout, stderr)
 	case "yield":
 		return yield(ctx, manager, args[1:], stdout, stderr)
 	case "kill":
@@ -84,8 +84,20 @@ func create(ctx context.Context, manager *termshare.Manager, args []string, stdo
 		return fail(stderr, err)
 	}
 	fmt.Fprintf(stdout, "created %s\n", name)
+	// From a real terminal, dropping straight into the session is what the
+	// user expects; scripted callers (no tty) can't attach and get the hint.
+	if stdinIsTerminal() {
+		return runOpen(ctx, manager, []string{name}, stdout, stderr)
+	}
 	fmt.Fprintf(stdout, "open:  agent-tmux open %s   (Ctrl-T toggles watching/control)\n", name)
 	return 0
+}
+
+// stdinIsTerminal reports whether the process was started with an
+// interactive stdin, i.e. whether attaching is meaningful at all.
+func stdinIsTerminal() bool {
+	info, err := os.Stdin.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
 func list(ctx context.Context, manager *termshare.Manager, stdout, stderr io.Writer) int {
@@ -233,7 +245,7 @@ func yield(ctx context.Context, manager *termshare.Manager, args []string, stdou
 	return 0
 }
 
-func open(ctx context.Context, manager *termshare.Manager, args []string, stdout, stderr io.Writer) int {
+func runOpen(ctx context.Context, manager *termshare.Manager, args []string, stdout, stderr io.Writer) int {
 	if len(args) != 1 {
 		fmt.Fprintln(stderr, "usage: agent-tmux open <session>")
 		return 2
@@ -287,6 +299,8 @@ attached terminal, with a single owner allowed to write at a time.
 
 Usage:
   agent-tmux create [--shell /bin/bash] <session>
+                              # starts the session, then attaches immediately
+                              # when run from a terminal (same as 'open')
   agent-tmux list
   agent-tmux status <session>
   agent-tmux screen [--history N] <session>
