@@ -40,6 +40,20 @@ make build
 ./bin/agent-tmux doctor
 ```
 
+## Shell Completion
+
+`make install` also installs completions for bash, zsh and fish: commands, flags,
+flag-value hints, and **live session names** (with owner and running command shown
+where the shell supports descriptions). To set it up by hand instead:
+
+```bash
+eval "$(agent-tmux completion bash)"          # ~/.bashrc
+eval "$(agent-tmux completion zsh)"           # ~/.zshrc, after compinit
+agent-tmux completion fish | source           # ~/.config/fish/config.fish
+```
+
+Completion never needs tmux to be running, and never prints errors into your prompt.
+
 ## Daily Workflow
 
 A scripted caller creates one Bash session:
@@ -133,6 +147,7 @@ agent-tmux kill work
 | `yield` | Clear the current owner |
 | `status` / `list` | Inspect sessions and their current owner |
 | `kill` | Terminate a session |
+| `completion` | Print the shell completion script for `bash`, `zsh` or `fish` |
 
 `open` currently needs one `Ctrl-T` before `Ctrl-Q` if the session is unclaimed, since tmux discards any bound command chain other than a bare `detach-client`/`switch-client` while a client is read-only — `Ctrl-Q` sets the quit flag as part of a chain, which only reliably fires once the client is writable.
 
@@ -211,6 +226,17 @@ The tmux server owns the local Bash PTY, so the session survives every caller di
 ```bash
 make test
 ```
+
+### Changing commands, flags or arguments
+
+`cmd/agent-tmux/commands.go` is the single definition of the CLI. Dispatch, flag
+parsing, argument-count validation, `help` output and shell completion are all
+generated from it, so there is nothing else to update: add or edit a command's
+constructor and everything follows. Never hardcode command, flag or session names in
+the completion scripts. Tests enforce this (`registry_test.go`, `complete_test.go`):
+flags must have a description and name their value in backquotes, positionals declare
+what they hold (`argSession` completes live sessions), and the scripts must remain
+dumb relays to `agent-tmux __complete`.
 
 The integration tests launch real tmux sessions and verify persistent shell state and ownership-based write exclusion.
 

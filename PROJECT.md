@@ -463,6 +463,40 @@ installed binary resolves and finds tmux/the socket correctly. `make install-ski
 and `make install-agents` were likewise run for real, not just dry-run-checked — the
 live symlinks listed in §10 are the proof.
 
+## 12b. Shell Completion (and why the CLI is a registry)
+
+Q: How is shell completion implemented?
+A: A hidden `agent-tmux __complete <words...>` command prints candidates (one per
+line, optional `<TAB>description`); the bash/zsh/fish scripts in
+`cmd/agent-tmux/completions/` are embedded in the binary and are dumb relays to it.
+`agent-tmux completion <shell>` prints them; `make install-completions` installs them.
+
+Q: Why is the CLI defined as a registry (`commands.go`) instead of a `switch` plus
+hand-written `flag` sets and a usage string?
+A: The user's requirement was that any change to a command or argument is reflected in
+autocomplete automatically. With the old shape the command list existed in three
+places (the switch, `printUsage`, the README) and flags in two (each handler and its
+usage string), so completion would have been a fourth copy guaranteed to drift. Now
+each command declares its `flag.FlagSet`, positionals (with a kind: free / session /
+choice) and summary once; dispatch, validation, help and completion all read that.
+Don't "simplify" this back into a switch.
+
+Q: What stops the scripts or help from drifting anyway?
+A: Tests: the scripts may not contain any registry word; every flag needs a
+description and (if it takes a value) a backquoted placeholder; every command is
+dispatchable and its `-h` prints the generated usage line; completion output is
+asserted against the registry rather than a hardcoded list; and a real bash run
+drives the script against a built binary.
+
+Q: Why must completion not require tmux, and never fail?
+A: `NewManager` errors when tmux is missing, and an error or hang at a prompt makes
+users uninstall completion. `__complete`/`help`/`completion` set `noManager`, session
+listing has a 2s timeout and swallows errors, and the command always exits 0.
+
+Q: Why aren't candidates escaped?
+A: Session names are validated to `[A-Za-z0-9._-]`; flags and commands are plain words.
+Loosening session-name validation requires revisiting the completion scripts.
+
 ## 13. Completion Detection Evolution (why the sentinel was replaced)
 
 Q: What was wrong with the original sentinel approach in shared sessions?

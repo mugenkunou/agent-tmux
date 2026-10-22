@@ -1,0 +1,36 @@
+#compdef agent-tmux
+# zsh completion for agent-tmux.
+#
+# Install:  eval "$(agent-tmux completion zsh)"   (after `autoload -U compinit && compinit`)
+#           or put this file, named _agent-tmux, in a directory on your $fpath.
+#
+# DO NOT add command, flag or session names to this file. It only relays the
+# words typed so far to `agent-tmux __complete`, which derives every candidate
+# from the CLI's own command registry. A test fails if this file starts
+# duplicating that knowledge.
+
+_agent-tmux() {
+    local -a lines candidates
+    local line value description
+
+    # Called directly (not through _call_program) so an empty current word
+    # survives as an argument instead of being eval-flattened away.
+    lines=("${(@f)$("${words[1]}" __complete "${(@)words[2,CURRENT]}" 2>/dev/null)}")
+
+    for line in $lines; do
+        [[ -n $line ]] || continue
+        value=${line%%$'\t'*}
+        description=
+        [[ $line == *$'\t'* ]] && description=${line#*$'\t'}
+        # _describe wants "value:description" with ":" escaped inside value.
+        candidates+=("${value//:/\\:}${description:+:$description}")
+    done
+
+    _describe -t candidates 'agent-tmux' candidates
+}
+
+if [[ $funcstack[1] == _agent-tmux ]]; then
+    _agent-tmux "$@"
+else
+    compdef _agent-tmux agent-tmux
+fi
