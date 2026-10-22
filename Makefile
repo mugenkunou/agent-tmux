@@ -1,33 +1,48 @@
-.PHONY: build install test clean hooks install-skill install-agents install-integration
+.PHONY: help build install install-bin test clean hooks install-skill install-agents install-integration
+.DEFAULT_GOAL := help
 
 GOTMPDIR := $(CURDIR)/.tmp/go
 
-build:
+# Where install-bin puts the binary. Defaults to Go's own install dir (GOBIN, else
+# the first GOPATH entry's bin/). Override with e.g. `make install BINDIR=~/.local/bin`.
+BINDIR ?= $(or $(shell go env GOBIN),$(firstword $(subst :, ,$(shell go env GOPATH)))/bin)
+
+help: ## List available targets (default)
+	@echo "Usage: make <target>"
+	@echo
+	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@echo
+	@echo "Variables:"
+	@echo "  BINDIR=<dir>         where install puts the binary (default: GOBIN, else GOPATH/bin)"
+
+build: ## Build bin/agent-tmux
 	mkdir -p bin $(GOTMPDIR)
 	GOTMPDIR=$(GOTMPDIR) go build -o bin/agent-tmux ./cmd/agent-tmux
 
-install:
-	mkdir -p $(GOTMPDIR)
-	GOTMPDIR=$(GOTMPDIR) go install ./cmd/agent-tmux
+# Skills/agents first so the binary's PATH check is the last thing printed.
+install: install-integration install-bin ## Everything: build, put the binary on PATH, install/update the skill and agents
 
-test:
-	mkdir -p $(GOTMPDIR)
-	GOTMPDIR=$(GOTMPDIR) go test ./...
-
-clean:
-	rm -rf bin .tmp
-
-hooks:
-	git config core.hooksPath .githooks
-	@echo "pre-commit secret scan enabled (requires gitleaks on PATH: https://github.com/gitleaks/gitleaks#installing)"
+install-bin: build ## Build and copy the binary into BINDIR, then check it resolves on PATH
+	mkdir -p $(BINDIR)
+	install -m 0755 bin/agent-tmux $(BINDIR)/agent-tmux
+	@found="$$(command -v agent-tmux)"; \
+	if [ -z "$$found" ]; then \
+		echo "WARNING: $(BINDIR) is not on PATH. Add this to your shell profile:" >&2; \
+		echo "  export PATH=\"$(BINDIR):\$$PATH\"" >&2; \
+	elif [ ! "$$found" -ef "$(BINDIR)/agent-tmux" ]; then \
+		echo "WARNING: $$found shadows $(BINDIR)/agent-tmux on PATH; remove it or put $(BINDIR) earlier." >&2; \
+	else \
+		echo "agent-tmux on PATH: $$found"; \
+	fi
 
 # Installs SKILL.md as a personal skill for every tool that reads the shared
 # SKILL.md standard (folder-per-skill: <skills-dir>/agent-tmux/SKILL.md).
-install-skill:
+# ln -sfn replaces whatever is there, so re-running repoints stale links too.
+install-skill: ## Link SKILL.md into Claude Code and Copilot CLI
 	mkdir -p $(HOME)/.claude/skills/agent-tmux
-	ln -sf $(CURDIR)/SKILL.md $(HOME)/.claude/skills/agent-tmux/SKILL.md
+	ln -sfn $(CURDIR)/SKILL.md $(HOME)/.claude/skills/agent-tmux/SKILL.md
 	mkdir -p $(HOME)/.copilot/skills/agent-tmux
-	ln -sf $(CURDIR)/SKILL.md $(HOME)/.copilot/skills/agent-tmux/SKILL.md
+	ln -sfn $(CURDIR)/SKILL.md $(HOME)/.copilot/skills/agent-tmux/SKILL.md
 	@echo "Installed SKILL.md for Claude Code (~/.claude/skills/agent-tmux) and"
 	@echo "Copilot CLI (~/.copilot/skills/agent-tmux)."
 	@echo "VS Code Copilot's skill discovery path is still settling upstream — if it"
@@ -35,13 +50,24 @@ install-skill:
 	@echo "the current personal-skills directory."
 
 # Installs the ready-made 'investigator' custom agent for every supported tool.
-install-agents:
+install-agents: ## Link the investigator agent into VS Code Copilot, Copilot CLI, and Claude Code
 	mkdir -p $(HOME)/.config/Code/User/prompts
-	ln -sf $(CURDIR)/agents/investigator.vscode.agent.md $(HOME)/.config/Code/User/prompts/investigator.agent.md
+	ln -sfn $(CURDIR)/agents/investigator.vscode.agent.md $(HOME)/.config/Code/User/prompts/investigator.agent.md
 	mkdir -p $(HOME)/.copilot/agents
-	ln -sf $(CURDIR)/agents/investigator.copilot-cli.agent.md $(HOME)/.copilot/agents/investigator.agent.md
+	ln -sfn $(CURDIR)/agents/investigator.copilot-cli.agent.md $(HOME)/.copilot/agents/investigator.agent.md
 	mkdir -p $(HOME)/.claude/agents
-	ln -sf $(CURDIR)/agents/investigator.claude.md $(HOME)/.claude/agents/investigator.md
+	ln -sfn $(CURDIR)/agents/investigator.claude.md $(HOME)/.claude/agents/investigator.md
 	@echo "Installed the 'investigator' agent for VS Code Copilot, Copilot CLI, and Claude Code."
 
-install-integration: install-skill install-agents
+install-integration: install-skill install-agents ## Skill + agents, without touching the binary
+
+test: ## Run the test suite
+	mkdir -p $(GOTMPDIR)
+	GOTMPDIR=$(GOTMPDIR) go test ./...
+
+clean: ## Remove build output
+	rm -rf bin .tmp
+
+hooks: ## Enable the gitleaks pre-commit secret scan for this clone
+	git config core.hooksPath .githooks
+	@echo "pre-commit secret scan enabled (requires gitleaks on PATH: https://github.com/gitleaks/gitleaks#installing)"

@@ -336,8 +336,8 @@ install locations.
 
 Q: How does someone actually install `SKILL.md` and the `investigator` agent, rather
 than just having the source files sit in this repo?
-A: `make install-skill` / `make install-agents` / `make install-integration` (both).
-These `ln -sf` the files from this repo into each tool's real config location
+A: `make install` (binary + both), or `make install-skill` / `make install-agents` /
+`make install-integration` (both, no binary). These `ln -sfn` the files from this repo into each tool's real config location
 (`~/.claude/skills/agent-tmux/SKILL.md`, `~/.copilot/skills/agent-tmux/SKILL.md`,
 `~/.config/Code/User/prompts/investigator.agent.md`, `~/.copilot/agents/investigator.agent.md`,
 `~/.claude/agents/investigator.md`) — symlinked, not copied, so a `git pull` here keeps

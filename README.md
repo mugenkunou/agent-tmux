@@ -20,17 +20,24 @@ Anyone attached can watch at any time, or temporarily claim the input lock to en
 - tmux
 - Go 1.23 or newer to build
 
-## Build
+## Install
+
+```bash
+make install
+agent-tmux doctor
+```
+
+This builds the binary, copies it into Go's install dir (`GOBIN`, else `GOPATH/bin`;
+override with `make install BINDIR=~/.local/bin`), checks that `agent-tmux` on `PATH`
+resolves to that copy, and installs or updates the skill and the `investigator` agent
+(see [Agent Integration](#agent-integration)). Re-run it after a `git pull` to pick up
+a new binary. Run `make` on its own to list every target.
+
+To build without installing anything:
 
 ```bash
 make build
 ./bin/agent-tmux doctor
-```
-
-To put the binary on `PATH`:
-
-```bash
-make install
 ```
 
 ## Daily Workflow
@@ -137,21 +144,18 @@ where every command should be classified and secrets/approvals always hand off t
 human) the `agents/` directory ships a ready-made custom agent named `investigator`,
 one file per tool, since each has its own schema.
 
-Install everything with one command:
+`make install` installs both alongside the binary. To install them without touching
+the binary:
 
 ```bash
 make install-integration   # SKILL.md + the investigator agent, all three tools
-```
-
-or install either piece on its own:
-
-```bash
-make install-skill   # SKILL.md only
-make install-agents  # investigator agent only
+make install-skill         # SKILL.md only
+make install-agents        # investigator agent only
 ```
 
 These symlink files from this repo into place, so `git pull` here keeps the installed
-copies current — nothing is duplicated by hand.
+copies current — nothing is duplicated by hand. Re-running any of them repoints
+existing links at this checkout, which also fixes links left dangling by a moved clone.
 
 | Content | File | Installed to |
 | --- | --- | --- |
