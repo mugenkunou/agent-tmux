@@ -153,6 +153,7 @@ agent-tmux kill work
 | `status` / `list` | Inspect sessions and their current owner |
 | `kill` | Terminate a session |
 | `completion` | Print the shell completion script for `bash`, `zsh` or `fish` |
+| `skill` | Print `SKILL.md`, matching this binary, for a skill manager to keep |
 
 `open` currently needs one `Ctrl-T` before `Ctrl-Q` if the session is unclaimed, since tmux discards any bound command chain other than a bare `detach-client`/`switch-client` while a client is read-only — `Ctrl-Q` sets the quit flag as part of a chain, which only reliably fires once the client is writable.
 
@@ -176,6 +177,17 @@ make install-agents        # investigator agent only
 These symlink files from this repo into place, so `git pull` here keeps the installed
 copies current — nothing is duplicated by hand. Re-running any of them repoints
 existing links at this checkout, which also fixes links left dangling by a moved clone.
+
+If a skill manager keeps your skills in its own folder, let the installed binary print
+the skill there instead, the same way `completion` prints its scripts:
+
+```bash
+agent-tmux skill > <skills-dir>/agent-tmux/SKILL.md
+```
+
+The copy matches the binary on `PATH`; run it again after each `make install-bin`.
+`make install` would still link the skill, so install with
+`make install-bin install-completions` (plus `make install-agents` for the agent).
 
 | Content | File | Installed to |
 | --- | --- | --- |

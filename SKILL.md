@@ -70,9 +70,8 @@ agent-tmux send <session> 'echo $?'
 agent-tmux screen --history 20 <session>
 ```
 
-There is no `run` command that returns an exit code in one call. See
-`PROJECT.md` §14 for why: any such fast path would have to assume something about the
-shell's prompt or environment (e.g. a `PS1` marker), and that assumption silently
+There is no `run` command that returns an exit code in one call: any such fast path
+would have to assume something about the shell's prompt or environment (e.g. a `PS1` marker), and that assumption silently
 breaks when the pane is running a **remote** shell. `send` + `screen`/`wait` has no
 such assumption, so it remains reliable even three `ssh` hops deep.
 

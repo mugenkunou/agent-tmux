@@ -32,6 +32,7 @@ func commands() []*command {
 		killCommand(),
 		doctorCommand(),
 		completionCommand(),
+		skillCommand(),
 		completeCommand(),
 		helpCommand(),
 	}

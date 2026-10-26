@@ -347,6 +347,17 @@ standard's folder-per-skill layout (`<skills-dir>/agent-tmux/SKILL.md`), confirm
 against Claude Code's and GitHub Copilot's own skills documentation — this repo had no
 install path documented for either the skill or the agents before this was added.
 
+Q: Why does the binary print its own skill (`agent-tmux skill`)?
+A: Skill managers keep their own folder of skills and link each into the tools, so they
+need a copy, not a link into this checkout. A link tracks the working tree, not the
+installed binary: between a `git pull` and `make install-bin` the skill can describe
+commands the binary on `PATH` lacks. Printing it from the binary ties the copy to the
+version that wrote it, the same reason completions come from the binary (§12b).
+`go:embed` cannot reach above `cmd/agent-tmux`, so the root package `agenttmux`
+(`skill.go`) embeds `SKILL.md` and it stays at the repo root. The copy ships alone, so
+`SKILL.md` must not point at other files in this repo; `skill_test.go` enforces that
+(the old pointer to §14 was inlined for it).
+
 ## 11. Enforcement Strength Ladder (how "hard" can we make agents use this?)
 
 Getting an AI coding agent to actually route shell work through `agent-tmux`, instead
