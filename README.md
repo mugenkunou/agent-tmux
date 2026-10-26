@@ -29,8 +29,8 @@ agent-tmux doctor
 
 This builds the binary, copies it into Go's install dir (`GOBIN`, else `GOPATH/bin`;
 override with `make install BINDIR=~/.local/bin`), checks that `agent-tmux` on `PATH`
-resolves to that copy, and installs or updates the `investigator` agent. The skill is
-left to you (see [Agent Integration](#agent-integration)). Re-run it after a `git pull` to pick up
+resolves to that copy, and installs shell completions. The skill and the `investigator`
+agent are left to you (see [Agent Integration](#agent-integration)). Re-run it after a `git pull` to pick up
 a new binary. Run `make` on its own to list every target.
 
 To build without installing anything:
@@ -165,7 +165,7 @@ where every command should be classified and secrets/approvals always hand off t
 human) the `agents/` directory ships a ready-made custom agent named `investigator`,
 one file per tool, since each has its own schema.
 
-`make install` installs the agent alongside the binary, but not the skill. Have the
+`make install` installs neither. Have the
 installed binary print the skill into your skills folder (or your skill manager's), the
 same way `completion` prints its scripts:
 
