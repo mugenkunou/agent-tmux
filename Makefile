@@ -19,8 +19,9 @@ build: ## Build bin/agent-tmux
 	mkdir -p bin $(GOTMPDIR)
 	GOTMPDIR=$(GOTMPDIR) go build -o bin/agent-tmux ./cmd/agent-tmux
 
-# Skills/agents first so the binary's PATH check is the last thing printed.
-install: install-integration install-bin install-completions ## Everything: build, put the binary on PATH, install/update the skill, agents and shell completions
+# Agents first so the binary's PATH check is the last thing printed. The skill is
+# left out: the user's skill manager keeps it (`agent-tmux skill`), or `make install-skill`.
+install: install-agents install-bin install-completions ## Build, put the binary on PATH, install/update the agents and shell completions (not the skill)
 
 install-bin: build ## Build and copy the binary into BINDIR, then check it resolves on PATH
 	mkdir -p $(BINDIR)

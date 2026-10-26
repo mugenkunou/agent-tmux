@@ -29,8 +29,8 @@ agent-tmux doctor
 
 This builds the binary, copies it into Go's install dir (`GOBIN`, else `GOPATH/bin`;
 override with `make install BINDIR=~/.local/bin`), checks that `agent-tmux` on `PATH`
-resolves to that copy, and installs or updates the skill and the `investigator` agent
-(see [Agent Integration](#agent-integration)). Re-run it after a `git pull` to pick up
+resolves to that copy, and installs or updates the `investigator` agent. The skill is
+left to you (see [Agent Integration](#agent-integration)). Re-run it after a `git pull` to pick up
 a new binary. Run `make` on its own to list every target.
 
 To build without installing anything:
@@ -165,8 +165,18 @@ where every command should be classified and secrets/approvals always hand off t
 human) the `agents/` directory ships a ready-made custom agent named `investigator`,
 one file per tool, since each has its own schema.
 
-`make install` installs both alongside the binary. To install them without touching
-the binary:
+`make install` installs the agent alongside the binary, but not the skill. Have the
+installed binary print the skill into your skills folder (or your skill manager's), the
+same way `completion` prints its scripts:
+
+```bash
+mkdir -p ~/.claude/skills/agent-tmux
+agent-tmux skill > ~/.claude/skills/agent-tmux/SKILL.md
+```
+
+The copy matches the binary on `PATH`; run it again after each `make install-bin`.
+
+To link the files from this repo instead, without touching the binary:
 
 ```bash
 make install-integration   # SKILL.md + the investigator agent, all three tools
@@ -177,17 +187,6 @@ make install-agents        # investigator agent only
 These symlink files from this repo into place, so `git pull` here keeps the installed
 copies current — nothing is duplicated by hand. Re-running any of them repoints
 existing links at this checkout, which also fixes links left dangling by a moved clone.
-
-If a skill manager keeps your skills in its own folder, let the installed binary print
-the skill there instead, the same way `completion` prints its scripts:
-
-```bash
-agent-tmux skill > <skills-dir>/agent-tmux/SKILL.md
-```
-
-The copy matches the binary on `PATH`; run it again after each `make install-bin`.
-`make install` would still link the skill, so install with
-`make install-bin install-completions` (plus `make install-agents` for the agent).
 
 | Content | File | Installed to |
 | --- | --- | --- |

@@ -336,7 +336,7 @@ install locations.
 
 Q: How does someone actually install `SKILL.md` and the `investigator` agent, rather
 than just having the source files sit in this repo?
-A: `make install` (binary + both), or `make install-skill` / `make install-agents` /
+A: `make install` (binary + the agents; the skill since left out, see the next Q), or `make install-skill` / `make install-agents` /
 `make install-integration` (both, no binary). These `ln -sfn` the files from this repo into each tool's real config location
 (`~/.claude/skills/agent-tmux/SKILL.md`, `~/.copilot/skills/agent-tmux/SKILL.md`,
 `~/.config/Code/User/prompts/investigator.agent.md`, `~/.copilot/agents/investigator.agent.md`,
@@ -356,7 +356,8 @@ version that wrote it, the same reason completions come from the binary (§12b).
 `go:embed` cannot reach above `cmd/agent-tmux`, so the root package `agenttmux`
 (`skill.go`) embeds `SKILL.md` and it stays at the repo root. The copy ships alone, so
 `SKILL.md` must not point at other files in this repo; `skill_test.go` enforces that
-(the old pointer to §14 was inlined for it).
+(the old pointer to §14 was inlined for it). For the same reason `make install` no
+longer installs the skill; `make install-skill` still links it for those who want that.
 
 ## 11. Enforcement Strength Ladder (how "hard" can we make agents use this?)
 
