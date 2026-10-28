@@ -100,6 +100,10 @@ Ctrl-T claims  ───────> Ctrl-T releases
       Ctrl-Q exits open, Ctrl-] opens the menu (both from either phase)
 ```
 
+The mouse wheel doesn't scroll the session's output inside `open`: tmux ignores the mouse
+for a watching terminal (see [PROJECT.md §9](PROJECT.md#9-known-limitations-deliberate-not-oversights)).
+To read further back, run `agent-tmux screen --history <lines> work` from another terminal.
+
 ### When the session is stuck
 
 `Ctrl-]` always gets you out, whether you are watching or in control and however

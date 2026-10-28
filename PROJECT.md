@@ -128,6 +128,13 @@ A: No — the keys go to copy-mode, and with a client attached `send-keys -l` wa
 to **hang** for more than 5 s. Never put the shared pane into copy-mode for one
 viewer's scrolling.
 
+Q: Could the terminal's own scrollback work under `tmux attach`, e.g. with the
+alternate screen turned off (`terminal-overrides '*:smcup@:rmcup@'`)?
+A: No. A `tmux attach` client receives redrawn screens, not the pane's output: when a
+program printed 5000 lines at once, the client received about 250 of them, and the
+lines in between were never sent. A control-mode client (`tmux -C`) received all 5000
+(verified, tmux 3.4). Only a control-mode viewer can fill the terminal's scrollback.
+
 Q: Why did the colored status banner render as nothing?
 A: A comma inside a `#[...]` style tag (`#[bg=colour2,fg=black]`) is
 indistinguishable from the outer `#{?cond,true,false}` separators — drops the whole
@@ -306,8 +313,9 @@ that exact change is what silently breaks it.
 ## 9. Known Limitations (deliberate, not oversights)
 
 - The mouse wheel doesn't scroll output in `open`: `tmux attach` draws on the
-  terminal's alternate screen, which has no scrollback, and tmux ignores mouse events
-  from a read-only client (§4). Turning on `mouse` and copy-mode was rejected: copy-mode
+  terminal's alternate screen, which has no scrollback (turning it off doesn't help:
+  the client gets redrawn screens, not every line), and tmux ignores mouse events from
+  a read-only client (§4). Turning on `mouse` and copy-mode was rejected: copy-mode
   belongs to the *pane*, so one viewer scrolling scrolls everyone, and a scripted
   `send-keys` into a pane in copy-mode is swallowed and was seen to hang (§4). A
   control-mode viewer (`open --native`) that streamed output into the terminal's own
