@@ -10,6 +10,7 @@ Builds on `docs/recon-audit.md`.
 | 1b stale-claim fix (agent no longer locked out) | **done** |
 | 1c history-limit | **done** (50000 by default, `create --history`) |
 | 2 audit mode + `view` | open, waiting on decisions 1–3 below |
+| Exclusive control across plain/native/take (bug found after phase 3) | **done**, see `docs/HANDOFF.md` |
 | 3 passthrough `open` v2 (mouse scrolling) | **done** as `open --native` (experimental; becoming the default is still open) |
 
 ## Principles

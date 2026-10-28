@@ -41,9 +41,6 @@ func (m *Manager) OpenNative(ctx context.Context, name string, hooks OpenHooks) 
 	if !isTerminal(os.Stdin) || !isTerminal(os.Stdout) {
 		return errors.New("open --native needs a terminal on stdin and stdout")
 	}
-	if err := m.release(ctx, name); err != nil {
-		return err
-	}
 	pane, err := m.run(ctx, nil, "display-message", "-p", "-t", target(name), "#{pane_id}")
 	if err != nil {
 		return err
@@ -412,7 +409,7 @@ func (c *nativeClient) loop(ctx context.Context, hooks OpenHooks, saved syscall.
 			}
 			action, keys := c.input.filter(chunk)
 			if len(keys) > 0 {
-				c.forward(keys)
+				c.forward(ctx, keys)
 			}
 			switch action {
 			case exitToggle:
@@ -433,8 +430,17 @@ func (c *nativeClient) loop(ctx context.Context, hooks OpenHooks, saved syscall.
 
 // forward sends typed bytes to the pane while controlling, and rings the
 // bell (at most every two seconds) while watching, as a hint that typing
-// does nothing until Ctrl-T.
-func (c *nativeClient) forward(keys []byte) {
+// does nothing until Ctrl-T. Before sending, it asks tmux whether this
+// process still owns the session, so a `yield` takes effect on the very
+// next keystroke rather than at the next ownership poll.
+func (c *nativeClient) forward(ctx context.Context, keys []byte) {
+	if c.controlling {
+		owner, held, err := c.m.holdsControl(ctx, c.name)
+		if err != nil || !held {
+			c.controlling = false
+			c.showOwner(owner)
+		}
+	}
 	if !c.controlling {
 		if time.Since(c.lastBell) > 2*time.Second {
 			c.lastBell = time.Now()
@@ -466,11 +472,29 @@ func (c *nativeClient) toggle(ctx context.Context) error {
 		return nil
 	}
 	if err := c.m.claim(ctx, c.name, c.id, c.tty); err != nil {
-		return err
+		if !errors.Is(err, ErrControlled) {
+			return err
+		}
+		c.notify("Ctrl-T refused: " + err.Error())
+		return nil
 	}
 	c.controlling = true
 	c.showOwner(c.id)
 	return nil
+}
+
+// notify tells the user something without disturbing the pane's picture
+// more than necessary: a bell, the message in the title for a moment, and
+// on the normal screen a line of its own (it becomes part of scrollback).
+// On the alternate screen a full-screen program owns every cell, so only
+// the bell and title are used there.
+func (c *nativeClient) notify(message string) {
+	c.out.Lock()
+	_, _ = os.Stdout.WriteString("\a\x1b]0;agent-tmux: " + message + "\a")
+	if !c.alt.Load() {
+		_, _ = os.Stdout.WriteString("\r\n[agent-tmux] " + message + "\r\n")
+	}
+	c.out.Unlock()
 }
 
 // syncOwner notices ownership changed elsewhere (a `take`, a `yield`) and
@@ -536,11 +560,14 @@ func (c *nativeClient) menu(ctx context.Context, hooks OpenHooks, saved syscall.
 		return true, err
 	}
 	if wasControlling {
-		if err := c.m.claim(ctx, c.name, c.id, c.tty); err != nil {
+		if err := c.m.claim(ctx, c.name, c.id, c.tty); err == nil {
+			c.controlling = true
+			c.showOwner(c.id)
+		} else if !errors.Is(err, ErrControlled) {
 			return true, err
 		}
-		c.controlling = true
-		c.showOwner(c.id)
+		// If someone else took control while the menu was up, come back
+		// watching; syncOwner shows who has it.
 	}
 	c.input = inputFilter{}
 	return false, c.snapshot(false)

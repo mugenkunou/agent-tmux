@@ -225,6 +225,18 @@ which briefly hold an ownership claim.
   is gone or a zombie, the claim is **stale**: `send`/`key` clear it under the session
   lock instead of refusing, and `status`/`list` show the session as unclaimed. A claim
   with no recorded process (from an older version) is never treated as stale.
+- **Claims are exclusive.** `claim` refuses with `ErrControlled` while another *live*
+  process holds the session (a stale or own claim is replaced). `release` only clears a
+  claim this process holds. Before this, `claim` overwrote the owner unconditionally,
+  and `open` released on start, so two attached terminals could both be writable at
+  once: a plain `open` stayed attached writable while a native `open` claimed, and both
+  typed into the pane. That broke the project's core promise. The regression test
+  `TestOnlyOneTerminalControlsAcrossOpenModes` drives one plain and one native `open`
+  on separate ptys.
+- **`yield` is the override.** It clears the owner and `detach-client -E 'exit 10'`s
+  every writable non-control client (a plain `open` re-attaches read-only). A native
+  `open` asks tmux whether it still owns the session before forwarding each keystroke,
+  so it stops on the next key.
 - **Closing the tab while in control**: `open`/`take` catch SIGHUP while attached, so
   when the terminal hangs up, the tmux client exits and the wrapper lives long enough
   to release. The stale-claim check covers what this can't (SIGKILL, crash).

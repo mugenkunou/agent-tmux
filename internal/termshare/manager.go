@@ -323,7 +323,7 @@ func (m *Manager) Watch(ctx context.Context, name string) error {
 		return err
 	}
 	defer preserveTerminalTitle(os.Stdout)()
-	_, err := m.attach(ctx, name, true)
+	_, err := m.attach(ctx, name, true, "")
 	return err
 }
 
@@ -352,9 +352,6 @@ func (m *Manager) Open(ctx context.Context, name string, hooks OpenHooks) error 
 	if err := m.ensureBindings(ctx); err != nil {
 		return err
 	}
-	if err := m.release(ctx, name); err != nil {
-		return err
-	}
 	defer preserveTerminalTitle(os.Stdout)()
 	defer surviveHangup()()
 
@@ -367,17 +364,23 @@ func (m *Manager) Open(ctx context.Context, name string, hooks OpenHooks) error 
 		} else if !exists {
 			return nil
 		}
-		owner := OwnerUnclaimed
+		owner, notice := OwnerUnclaimed, ""
 		if controlling {
 			if err := m.claim(ctx, name, id, tty); err != nil {
-				return err
+				if !errors.Is(err, ErrControlled) {
+					return err
+				}
+				// Someone else holds control: stay watching, and say so.
+				controlling = false
+				notice = "Ctrl-T refused: " + err.Error()
+			} else {
+				owner = id
 			}
-			owner = id
 		}
 		if hooks.Phase != nil {
 			hooks.Phase(owner)
 		}
-		code, attachErr := m.attach(ctx, name, !controlling)
+		code, attachErr := m.attach(ctx, name, !controlling, notice)
 		if controlling {
 			_ = m.release(context.Background(), name)
 		}
@@ -433,7 +436,7 @@ func (m *Manager) Take(ctx context.Context, name string) error {
 	}
 	defer preserveTerminalTitle(os.Stdout)()
 	defer surviveHangup()()
-	_, attachErr := m.attach(ctx, name, false)
+	_, attachErr := m.attach(ctx, name, false, "")
 	releaseErr := m.release(context.Background(), name)
 	if attachErr != nil {
 		return attachErr
@@ -441,8 +444,42 @@ func (m *Manager) Take(ctx context.Context, name string) error {
 	return releaseErr
 }
 
+// Yield takes control away from whoever holds it, live or not, and puts
+// their writable tmux client back to watching (a plain `open` re-attaches
+// read-only; a native `open` checks ownership before every keystroke it
+// forwards). It is the manual override; normal handoffs never need it.
 func (m *Manager) Yield(ctx context.Context, name string) error {
-	return m.release(ctx, name)
+	if err := validateSessionName(name); err != nil {
+		return err
+	}
+	return m.withLock(name, func() error {
+		if err := m.requireSession(ctx, name); err != nil {
+			return err
+		}
+		if err := m.clearOwner(ctx, name); err != nil {
+			return err
+		}
+		return m.detachWriters(ctx, name)
+	})
+}
+
+// detachWriters ends every writable, non-control tmux client on the
+// session with exitToggle, so a plain `open` holding it falls back to
+// watching. The caller holds the session lock.
+func (m *Manager) detachWriters(ctx context.Context, name string) error {
+	out, err := m.run(ctx, nil, "list-clients", "-t", exact(name), "-F",
+		"#{client_name}\t#{client_readonly}\t#{client_control_mode}")
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 3 || fields[1] == "1" || fields[2] == "1" {
+			continue
+		}
+		_, _ = m.run(ctx, nil, "detach-client", "-t", fields[0], "-E", "exit "+strconv.Itoa(exitToggle))
+	}
+	return nil
 }
 
 // Restart kills whatever runs in the session's pane and starts the session's
@@ -473,6 +510,12 @@ func (m *Manager) Kill(ctx context.Context, name string) error {
 // refused until release runs. It also records this process's identity: if
 // the process goes away without releasing (killed, or its terminal closed
 // before it could), the claim is stale and withAgentControl clears it.
+//
+// Claims are exclusive: while another live process holds control, claim
+// fails with ErrControlled. This is the rule that keeps two attached
+// terminals (in any mix of plain and native open, or take) from typing into
+// the session at once. Re-claiming from the process that already holds it
+// succeeds.
 func (m *Manager) claim(ctx context.Context, name, actorID, tty string) error {
 	if actorID == "" {
 		return errors.New("actor id cannot be empty")
@@ -484,6 +527,13 @@ func (m *Manager) claim(ctx context.Context, name, actorID, tty string) error {
 		if err := m.requireSession(ctx, name); err != nil {
 			return err
 		}
+		owner, proc, err := m.readOwner(ctx, name)
+		if err != nil {
+			return err
+		}
+		if owner != OwnerUnclaimed && proc != processIdentity(os.Getpid()) && !claimStale(proc) {
+			return fmt.Errorf("actor %q controls the terminal: %w", owner, ErrControlled)
+		}
 		generation := m.readGeneration(ctx, name)
 		if _, err := m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-owner", actorID); err != nil {
 			return err
@@ -494,12 +544,14 @@ func (m *Manager) claim(ctx context.Context, name, actorID, tty string) error {
 		if _, err := m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-owner-proc", processIdentity(os.Getpid())); err != nil {
 			return err
 		}
-		_, err := m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-generation", strconv.Itoa(generation+1))
+		_, err = m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-generation", strconv.Itoa(generation+1))
 		return err
 	})
 }
 
-// release clears the session's owner back to OwnerUnclaimed.
+// release clears the session's owner back to OwnerUnclaimed, but only if
+// this process holds it: a terminal that never had control must not be
+// able to drop someone else's.
 func (m *Manager) release(ctx context.Context, name string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
@@ -508,8 +560,39 @@ func (m *Manager) release(ctx context.Context, name string) error {
 		if err := m.requireSession(ctx, name); err != nil {
 			return err
 		}
+		_, proc, err := m.readOwner(ctx, name)
+		if err != nil {
+			return err
+		}
+		if proc != processIdentity(os.Getpid()) {
+			return nil
+		}
 		return m.clearOwner(ctx, name)
 	})
+}
+
+// readOwner returns the session's owner and the process identity that
+// claimed it.
+func (m *Manager) readOwner(ctx context.Context, name string) (owner, proc string, err error) {
+	raw, err := m.run(ctx, nil, "display-message", "-p", "-t", target(name), "#{@agent-tmux-owner}\t#{@agent-tmux-owner-proc}")
+	if err != nil {
+		return "", "", err
+	}
+	owner, proc, _ = strings.Cut(strings.TrimRight(raw, "\n"), "\t")
+	return owner, proc, nil
+}
+
+// holdsControl reports whether this process currently owns the session.
+func (m *Manager) holdsControl(ctx context.Context, name string) (owner string, held bool, err error) {
+	var proc string
+	owner, proc, err = m.readOwner(ctx, name)
+	if err != nil {
+		return "", false, err
+	}
+	if owner != OwnerUnclaimed && claimStale(proc) {
+		owner = OwnerUnclaimed
+	}
+	return owner, owner != OwnerUnclaimed && proc == processIdentity(os.Getpid()), nil
 }
 
 // clearOwner does release's work; the caller holds the session lock.
@@ -540,11 +623,10 @@ func (m *Manager) withAgentControl(ctx context.Context, name string, action func
 		if err := m.requireSession(ctx, name); err != nil {
 			return err
 		}
-		raw, err := m.run(ctx, nil, "display-message", "-p", "-t", target(name), "#{@agent-tmux-owner}\t#{@agent-tmux-owner-proc}")
+		owner, proc, err := m.readOwner(ctx, name)
 		if err != nil {
 			return err
 		}
-		owner, proc, _ := strings.Cut(strings.TrimRight(raw, "\n"), "\t")
 		if owner != OwnerUnclaimed && claimStale(proc) {
 			// Whoever claimed control is gone without releasing it (for
 			// example, its terminal tab was closed): nobody can be typing.
@@ -615,8 +697,9 @@ func (m *Manager) applyClientOptions(ctx context.Context, name string) error {
 
 // attach runs a tmux client on this terminal until it ends, and returns the
 // exit code naming the key that ended it (see exitToggle and friends), or
-// exitDetached for any other clean detach.
-func (m *Manager) attach(ctx context.Context, name string, readOnly bool) (int, error) {
+// exitDetached for any other clean detach. A non-empty notice is shown on
+// the client's status line for a few seconds.
+func (m *Manager) attach(ctx context.Context, name string, readOnly bool, notice string) (int, error) {
 	if err := m.applyClientOptions(ctx, name); err != nil {
 		return 0, err
 	}
@@ -626,6 +709,10 @@ func (m *Manager) attach(ctx context.Context, name string, readOnly bool) (int, 
 		args = append(args, "-r")
 	}
 	args = append(args, "-t", exact(name))
+	if notice != "" {
+		// display-message expands formats; escape # so the text is literal.
+		args = append(args, ";", "display-message", "-d", "5000", strings.ReplaceAll(notice, "#", "##"))
+	}
 	cmd := exec.CommandContext(ctx, m.tmux, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

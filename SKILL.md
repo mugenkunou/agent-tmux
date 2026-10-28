@@ -32,7 +32,7 @@ This protects the terminal's live input channel at the moment something needs a 
    (`agent-tmux create <session>` attaches the same way when the user runs it from
    their own terminal; only a scripted caller without a terminal stays detached.)
 
-   It attaches once, in the same terminal tab, starting unclaimed (watch-only). Pressing `Ctrl-T` claims control instantly for whoever is attached; pressing `Ctrl-T` again releases it. `Ctrl-Q` exits `open` and returns their terminal to a normal prompt without ending the session. `Ctrl-]` opens a menu (detach, kill session, restart shell, send Ctrl-C) for when the session is stuck. No second tab and no separate `take`/`yield` commands are needed for routine handoffs.
+   It attaches once, in the same terminal tab, starting unclaimed (watch-only). Pressing `Ctrl-T` claims control instantly for whoever is attached (it is refused while another terminal holds control); pressing `Ctrl-T` again releases it. `Ctrl-Q` exits `open` and returns their terminal to a normal prompt without ending the session. `Ctrl-]` opens a menu (detach, kill session, restart shell, send Ctrl-C) for when the session is stuck. No second tab and no separate `take`/`yield` commands are needed for routine handoffs.
 
 ## Running Commands
 
