@@ -40,10 +40,11 @@
 - Built: closing the tab releases at once; if the open/take process dies some other way, its claim is cleared on the next send or status.
 - Decide: nothing. It's a bug fix.
 
-9. Mouse scrolling like a normal terminal
+9. [DONE, behind a flag] Mouse scrolling like a normal terminal
 - Problem: the mouse wheel doesn't scroll in a session. tmux can't fix this while you're only watching.
 - Change: replace how open connects, so the session shows in your terminal like ssh output. Wheel, selection and Ctrl+F then work natively. This is the biggest change.
 - Downside: if two people watch at different window sizes, one sees wrapped lines.
-- Decide: worth doing? And should it come now or after the rest?
+- Built: `agent-tmux open --native <name>`. Plain `open` is unchanged; making --native the default is still open.
+- Also built: tmux keeps 50000 lines per new session instead of 2000 (`create --history` to change). The file recording from change 1 is not built.
 
 ---

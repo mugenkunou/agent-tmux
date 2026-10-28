@@ -100,6 +100,35 @@ Ctrl-T claims  ───────> Ctrl-T releases
       Ctrl-Q exits open, Ctrl-] opens the menu (both from either phase)
 ```
 
+### Scrolling like a normal terminal: `open --native` (experimental)
+
+```bash
+agent-tmux open --native work
+```
+
+Plain `open` runs `tmux attach`, which draws the session on a screen with no
+scrollback, and tmux ignores the mouse wheel while you are only watching. `--native`
+shows the session in your terminal's own screen instead, the way ssh does: it prints
+what tmux remembers of the session, then streams the session's output live. Your
+terminal keeps the scrollback, so the mouse wheel, text selection and your terminal's
+own search all work, whether you are watching or in control, and the transcript stays
+in the tab after you leave.
+
+The keys are the same: `Ctrl-T`, `Ctrl-Q` and `Ctrl-]`. While watching, typing does
+nothing except ring the bell (at most every two seconds).
+
+Trade-offs:
+
+- The session has one size. `--native` sets it to your terminal's size and follows
+  when you resize, so another viewer with a different size sees wrapped or cut-off lines.
+- Joining while a full-screen program (vim, htop) is running redraws its current screen.
+  If something looks off, `Ctrl-L` in that program usually fixes it.
+- Output the session prints while the `Ctrl-]` menu is up isn't drawn. It's still in
+  tmux's history.
+- Scrollback before you joined goes back as far as tmux remembers: 50000 lines by
+  default (`create --history <lines>`). A session created by an older version keeps
+  tmux's default of 2000.
+
 ### When the session is stuck
 
 `Ctrl-]` always gets you out, whether you are watching or in control and however
@@ -165,12 +194,12 @@ agent-tmux kill work
 
 | Command | Purpose |
 | --- | --- |
-| `create` | Start a persistent Bash session; from a terminal, attaches immediately (same as `open`) |
+| `create` | Start a persistent Bash session (50000 lines of scrollback, `--history` to change); from a terminal, attaches immediately (same as `open`) |
 | `send` | Send text, useful for routine commands and interactive programs alike |
 | `key` | Send keys such as `C-c`, `C-z`, or `Escape` |
 | `screen` | Read the current rendered terminal |
 | `wait` | Wait until expected text appears |
-| `open` | Attach once; `Ctrl-T` toggles unclaimed/claimed, `Ctrl-Q` exits, `Ctrl-]` opens the menu |
+| `open` | Attach once; `Ctrl-T` toggles unclaimed/claimed, `Ctrl-Q` exits, `Ctrl-]` opens the menu; `--native` for mouse scrolling |
 | `watch` | Attach a read-only terminal |
 | `take` | Claim ownership and attach a writable terminal |
 | `yield` | Clear the current owner |

@@ -54,17 +54,18 @@ func createCommand() *command {
 	shell := c.fs.String("shell", "/bin/bash", "`path` of the login shell to start")
 	cols := c.fs.Int("cols", 120, "initial terminal width in `columns`")
 	rows := c.fs.Int("rows", 36, "initial terminal height in `rows`")
+	history := c.fs.Int("history", termshare.DefaultHistoryLimit, "scrollback `lines` tmux keeps for the session")
 	c.args = []positional{{name: "session", kind: argFree}}
 	c.run = func(inv *invocation) int {
 		name := inv.args[0]
-		if err := inv.manager.Create(inv.ctx, name, *shell, *cols, *rows); err != nil {
+		if err := inv.manager.CreateWithHistory(inv.ctx, name, *shell, *cols, *rows, *history); err != nil {
 			return fail(inv.stderr, err)
 		}
 		fmt.Fprintf(inv.stdout, "created %s\n", name)
 		// From a real terminal, dropping straight into the session is what the
 		// user expects; scripted callers (no tty) can't attach and get the hint.
 		if stdinIsTerminal() {
-			return openSession(inv, name)
+			return openSession(inv, name, false)
 		}
 		fmt.Fprintf(inv.stdout, "open:  agent-tmux open %s   (Ctrl-T toggles watching/control, Ctrl-] menu)\n", name)
 		return 0
@@ -213,12 +214,13 @@ func takeCommand() *command {
 
 func openCommand() *command {
 	c := newCommand("open", "attach once; Ctrl-T toggles watching/control, Ctrl-] opens a menu (detach, kill, restart, Ctrl-C)")
+	native := c.fs.Bool("native", false, "show the session in this terminal's own screen, so mouse scrolling, selection and search work (experimental)")
 	c.args = []positional{sessionArg}
-	c.run = func(inv *invocation) int { return openSession(inv, inv.args[0]) }
+	c.run = func(inv *invocation) int { return openSession(inv, inv.args[0], *native) }
 	return c
 }
 
-func openSession(inv *invocation, name string) int {
+func openSession(inv *invocation, name string, native bool) int {
 	hooks := termshare.OpenHooks{
 		Phase: func(owner string) {
 			if owner == termshare.OwnerUnclaimed {
@@ -227,9 +229,13 @@ func openSession(inv *invocation, name string) int {
 				fmt.Fprintf(inv.stdout, "-- %s controls %s: Ctrl-T releases, Ctrl-Q exits, Ctrl-] menu --\n", owner, name)
 			}
 		},
-		Menu: func() bool { return escapeMenu(inv, name) },
+		Menu: func(readKey func() (byte, error)) bool { return escapeMenu(inv, name, readKey) },
 	}
-	if err := inv.manager.Open(inv.ctx, name, hooks); err != nil {
+	open := inv.manager.Open
+	if native {
+		open = inv.manager.OpenNative
+	}
+	if err := open(inv.ctx, name, hooks); err != nil {
 		return fail(inv.stderr, err)
 	}
 	return 0

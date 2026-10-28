@@ -8,9 +8,9 @@ Builds on `docs/recon-audit.md`.
 |---|---|
 | 1a escape menu + exit-code key bindings | **done** |
 | 1b stale-claim fix (agent no longer locked out) | **done** |
-| 1c history-limit | open |
+| 1c history-limit | **done** (50000 by default, `create --history`) |
 | 2 audit mode + `view` | open, waiting on decisions 1–3 below |
-| 3 passthrough `open` v2 (mouse scrolling) | open, waiting on decision 5 |
+| 3 passthrough `open` v2 (mouse scrolling) | **done** as `open --native` (experimental; becoming the default is still open) |
 
 ## Principles
 
@@ -105,7 +105,10 @@ same mark.
 - The log contains anything commands print, `kubectl get secret` included. Files are
   0600 in 0700 directories, and nothing syncs them.
 
-## Phase 3: `open` v2, a passthrough client (behind a flag first)
+## Phase 3: `open` v2, a passthrough client (behind a flag first). DONE as `open --native`
+
+Built as described below. Details and verified control-mode facts are in PROJECT.md §15.
+`[/] history` in the menu and `Enter ~ .` were not built.
 
 This is the only real fix for "scroll like a normal terminal while watching":
 - Replace `tmux attach` with a control-mode client (`tmux -C`). On attach, it dumps the

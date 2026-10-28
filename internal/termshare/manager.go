@@ -125,7 +125,17 @@ func (m *Manager) Version(ctx context.Context) (string, error) {
 	return strings.TrimSpace(output), err
 }
 
+// DefaultHistoryLimit is how many lines of scrollback a new session keeps in
+// tmux. tmux's own default is 2000. Memory is spent only as lines arrive,
+// roughly 2 KB per kept line, so a full 50000-line history is about 100 MB.
+const DefaultHistoryLimit = 50000
+
 func (m *Manager) Create(ctx context.Context, name, shell string, cols, rows int) error {
+	return m.CreateWithHistory(ctx, name, shell, cols, rows, DefaultHistoryLimit)
+}
+
+// CreateWithHistory is Create with the session's scrollback size in lines.
+func (m *Manager) CreateWithHistory(ctx context.Context, name, shell string, cols, rows, history int) error {
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
@@ -134,6 +144,9 @@ func (m *Manager) Create(ctx context.Context, name, shell string, cols, rows int
 	}
 	if shell == "" {
 		return errors.New("shell cannot be empty")
+	}
+	if history < 0 {
+		return errors.New("history must not be negative")
 	}
 
 	return m.withLock("create", func() error {
@@ -145,8 +158,14 @@ func (m *Manager) Create(ctx context.Context, name, shell string, cols, rows int
 			return fmt.Errorf("session %q already exists", name)
 		}
 
+		// A pane takes its history-limit from the global option when it is
+		// created, so set it in the same tmux invocation, right before
+		// new-session (start-server makes this work on a cold server too).
+		// The create lock keeps concurrent creates from mixing values.
 		shellCommand := "exec " + shellQuote(shell) + " -l"
 		if _, err := m.run(ctx, nil,
+			"start-server", ";",
+			"set-option", "-g", "history-limit", strconv.Itoa(history), ";",
 			"new-session", "-d", "-s", name,
 			"-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows),
 			shellCommand,
@@ -313,10 +332,11 @@ type OpenHooks struct {
 	// Phase is called as each attach starts: with OwnerUnclaimed when
 	// watching, with this process's actor id when controlling.
 	Phase func(owner string)
-	// Menu is called after Ctrl-], with the terminal back in normal mode and
-	// control released. It returns true to end Open, false to re-attach in
-	// the phase Ctrl-] was pressed from.
-	Menu func() (leave bool)
+	// Menu is called after Ctrl-], with control released and the terminal
+	// in a mode where output prints normally. It reads keypresses only
+	// through readKey. It returns true to end Open, false to go back to the
+	// phase Ctrl-] was pressed from.
+	Menu func(readKey func() (byte, error)) (leave bool)
 }
 
 // Open attaches once and loops between a genuinely read-only watching phase
@@ -368,7 +388,7 @@ func (m *Manager) Open(ctx context.Context, name string, hooks OpenHooks) error 
 		case exitToggle:
 			controlling = !controlling
 		case exitMenu:
-			if hooks.Menu != nil && hooks.Menu() {
+			if hooks.Menu != nil && hooks.Menu(func() (byte, error) { return ReadKey(os.Stdin) }) {
 				return nil
 			}
 		default:
