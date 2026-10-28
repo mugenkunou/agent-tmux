@@ -85,7 +85,7 @@ Someone can observe and take over from a real terminal, with a single key:
 agent-tmux open work
 ```
 
-`open` attaches once. It starts unclaimed: typed input does not reach the shell until someone claims it. Pressing `Ctrl-T` claims control instantly for whoever is attached, unless another terminal already holds it, in which case `Ctrl-T` is refused with a message naming the holder; pressing `Ctrl-T` again releases it. Only one terminal can be in control at a time, whatever mix of `open`, `open --native` and `take` is attached. While attached, the terminal tab/window title shows which session it is and who has input —
+`open` attaches once. It starts unclaimed: typed input does not reach the shell until someone claims it. Pressing `Ctrl-T` claims control instantly for whoever is attached, unless another terminal already holds it, in which case `Ctrl-T` is refused with a message naming the holder; pressing `Ctrl-T` again releases it. Only one terminal can be in control at a time, whatever mix of `open` and `take` is attached. While attached, the terminal tab/window title shows which session it is and who has input —
 `👀 agent-tmux: work (watching)` or `⌨️ agent-tmux: work (<actor> controls)` — so the right
 tab is easy to find, and the previous title is restored when you leave. This relies on your
 terminal honoring title escape sequences (most do); the emoji need a font that renders them.
@@ -99,35 +99,6 @@ Ctrl-T claims  ───────> Ctrl-T releases
         └────────────────────────┘
       Ctrl-Q exits open, Ctrl-] opens the menu (both from either phase)
 ```
-
-### Scrolling like a normal terminal: `open --native` (experimental)
-
-```bash
-agent-tmux open --native work
-```
-
-Plain `open` runs `tmux attach`, which draws the session on a screen with no
-scrollback, and tmux ignores the mouse wheel while you are only watching. `--native`
-shows the session in your terminal's own screen instead, the way ssh does: it prints
-what tmux remembers of the session, then streams the session's output live. Your
-terminal keeps the scrollback, so the mouse wheel, text selection and your terminal's
-own search all work, whether you are watching or in control, and the transcript stays
-in the tab after you leave.
-
-The keys are the same: `Ctrl-T`, `Ctrl-Q` and `Ctrl-]`. While watching, typing does
-nothing except ring the bell (at most every two seconds).
-
-Trade-offs:
-
-- The session has one size. `--native` sets it to your terminal's size and follows
-  when you resize, so another viewer with a different size sees wrapped or cut-off lines.
-- Joining while a full-screen program (vim, htop) is running redraws its current screen.
-  If something looks off, `Ctrl-L` in that program usually fixes it.
-- Output the session prints while the `Ctrl-]` menu is up isn't drawn. It's still in
-  tmux's history.
-- Scrollback before you joined goes back as far as tmux remembers: 50000 lines by
-  default (`create --history <lines>`). A session created by an older version keeps
-  tmux's default of 2000.
 
 ### When the session is stuck
 
@@ -199,7 +170,7 @@ agent-tmux kill work
 | `key` | Send keys such as `C-c`, `C-z`, or `Escape` |
 | `screen` | Read the current rendered terminal |
 | `wait` | Wait until expected text appears |
-| `open` | Attach once; `Ctrl-T` toggles unclaimed/claimed, `Ctrl-Q` exits, `Ctrl-]` opens the menu; `--native` for mouse scrolling |
+| `open` | Attach once; `Ctrl-T` toggles unclaimed/claimed, `Ctrl-Q` exits, `Ctrl-]` opens the menu |
 | `watch` | Attach a read-only terminal |
 | `take` | Claim ownership and attach a writable terminal |
 | `yield` | Take control away from whoever holds it and put their terminal back to watching |
@@ -270,7 +241,7 @@ There is no built-in notion of "agent" versus "human" — only whether a session
 - `watch` is enforced read-only by tmux; `open` starts the same way, using tmux's native read-only client flag rather than a custom key table (an earlier key-table-swallow design was tried and empirically disproven: unbound keys were still forwarded to the pane).
 - Only the current owner may write through `agent-tmux`; scripted `send`/`key` calls are refused while any actor holds ownership (`status` shows who).
 - `take` and `open`'s control phase set the owner to an actor id before attaching, under the session lock. A claim is refused (`ErrControlled`) while another live process holds it, so two attached terminals can never both be writable. Releasing only clears a claim this process holds.
-- `yield` is the override: it clears the owner and detaches every writable client, so a plain `open` falls back to watching; a native `open` checks ownership before each keystroke it forwards, so it stops on the next key.
+- `yield` is the override: it clears the owner and detaches every writable client, so an `open` in control falls back to watching.
 - Scripted writes attempted while someone else owns the session fail instead of being queued.
 - `Ctrl-T`, `Ctrl-Q` and `Ctrl-]` are bound server-wide to `detach-client -E 'exit N'`, a different N per key. `detach-client` is the one command tmux still honors for a read-only client, and the client's exit code tells `open` which key was pressed. `open` alternates read-only and writable `attach-session` calls around those detach points, claiming/releasing ownership on each transition.
 - Detaching from `take`, or either phase of `open`, clears the owner back to unclaimed. So does closing the tab: `open`/`take` survive the hangup long enough to release.

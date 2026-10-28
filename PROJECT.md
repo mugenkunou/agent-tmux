@@ -229,14 +229,10 @@ which briefly hold an ownership claim.
   process holds the session (a stale or own claim is replaced). `release` only clears a
   claim this process holds. Before this, `claim` overwrote the owner unconditionally,
   and `open` released on start, so two attached terminals could both be writable at
-  once: a plain `open` stayed attached writable while a native `open` claimed, and both
-  typed into the pane. That broke the project's core promise. The regression test
-  `TestOnlyOneTerminalControlsAcrossOpenModes` drives one plain and one native `open`
-  on separate ptys.
+  once and both type into the pane. That broke the project's core promise. The
+  regression test `TestOnlyOneTerminalControls` drives two `open`s on separate ptys.
 - **`yield` is the override.** It clears the owner and `detach-client -E 'exit 10'`s
-  every writable non-control client (a plain `open` re-attaches read-only). A native
-  `open` asks tmux whether it still owns the session before forwarding each keystroke,
-  so it stops on the next key.
+  every writable client (an `open` re-attaches read-only).
 - **Closing the tab while in control**: `open`/`take` catch SIGHUP while attached, so
   when the terminal hangs up, the tmux client exits and the wrapper lives long enough
   to release. The stale-claim check covers what this can't (SIGKILL, crash).
@@ -309,9 +305,13 @@ that exact change is what silently breaks it.
 
 ## 9. Known Limitations (deliberate, not oversights)
 
-- Mouse scrolling doesn't work while watching under plain `open`: tmux ignores mouse
-  events from a read-only client (§4). `open --native` (§15) fixes this, with its own
-  trade-off: one pane size for all viewers.
+- The mouse wheel doesn't scroll output in `open`: `tmux attach` draws on the
+  terminal's alternate screen, which has no scrollback, and tmux ignores mouse events
+  from a read-only client (§4). Turning on `mouse` and copy-mode was rejected: copy-mode
+  belongs to the *pane*, so one viewer scrolling scrolls everyone, and a scripted
+  `send-keys` into a pane in copy-mode is swallowed and was seen to hang (§4). A
+  control-mode viewer (`open --native`) that streamed output into the terminal's own
+  scrollback was built and then removed, to keep one viewing mode: plain `tmux attach`.
 - No real authentication — actor ids are self-reported (§6). Fine for one trusted user
   on one machine; not fine as a multi-tenant boundary.
 - Session-level, not pane-level, ownership: one writer for the whole session, not
@@ -723,54 +723,7 @@ A: No. `send`/`key` are still refused while another actor holds ownership, exact
 session's prompt is whatever the user's own shell config would normally produce —
 one less thing agent-tmux changes about the environment it's given.
 
-## 15. `open --native`: a passthrough viewer instead of `tmux attach`
-
-Q: Why does plain `open` not scroll like a terminal?
-A: `tmux attach` draws on the terminal's alternate screen, which has no scrollback,
-and tmux ignores mouse events and copy-mode bindings from a read-only client. Turning
-on `mouse` and copy-mode was rejected: copy-mode belongs to the *pane*, so one viewer
-scrolling scrolls everyone, and a scripted `send-keys` into a pane in copy-mode is
-swallowed and was seen to hang (§4).
-
-Q: What does `--native` do instead?
-A: It runs a tmux **control-mode** client (`tmux -C attach`). In one command line it
-sends `refresh-client -C <cols>,<rows>`, a `display-message` with the pane's modes
-(cursor, alternate screen, keypad, mouse, scroll region), a history capture and a
-screen capture. It prints the history (into the terminal's real scrollback) and the
-screen, then writes every `%output` payload straight to the terminal. tmux answers
-control-mode commands in order with the pane's output, so output before the answer is
-already in the capture and output after it is drawn on top: nothing is lost or doubled.
-tmux still owns the PTY and the emulation the agent reads; only the viewer changed.
-This is not the "custom VT100 emulator" rejected in Rejected Architectures, since
-nothing here interprets the screen.
-
-Q: How is input handled?
-A: The Go process puts the terminal in raw mode and reads stdin itself. It drops input
-while watching (and rings the bell, rate-limited). While controlling, it sends input
-with `send-keys -H <hex bytes>`, which is byte-exact (verified: Ctrl-C, ESC sequences,
-UTF-8, CR, DEL). Ctrl-T/Ctrl-Q/Ctrl-] are caught before forwarding. Terminal *replies*
-to queries the pane's program made (device attributes, cursor position, OSC colour
-reports) also come in on stdin, because the output passes straight through. tmux has
-already answered those for the pane, so `inputFilter` drops them instead of typing
-them into the program.
-
-Q: Verified facts about control mode (tmux 3.4)?
-A:
-- `%output %<pane> <data>` escapes bytes below 32 and `\` as `\ooo` octal.
-- Several `;`-separated commands on one line produce one `%begin/%end` block each;
-  blocks for commands we sent have flags `1`.
-- `refresh-client -C WxH` resizes the pane immediately (window-size `latest`).
-- Without `pause-after`, tmux delivered all 200k lines of a flood, even to a reader
-  that stalled for 4 s. With `pause-after` it pauses and needs `-A %p:continue`. We
-  don't set it.
-- Closing the control client's stdin detaches it cleanly (`%exit`).
-
-Q: Known trade-offs?
-A: One pane size, following the latest viewer, so another viewer at a different size
-sees wrapping glitches. Joining mid-full-screen-program redraws from `capture-pane`, so
-exotic modes can be off until the program redraws. Output while the Ctrl-] menu is up
-isn't drawn (it's in tmux history). Ownership changes made elsewhere are picked up
-every 2 s for the title and the input gate.
+## 15. History limit
 
 Q: History limit?
 A: `create` sets `history-limit` (default 50000, `--history`) in the *same* tmux

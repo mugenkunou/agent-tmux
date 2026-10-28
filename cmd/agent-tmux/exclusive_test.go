@@ -17,12 +17,11 @@ import (
 )
 
 // One writer at a time is the reason agent-tmux exists. This drives two
-// real `open` processes on two separate ptys, one plain (tmux attach) and
-// one native (control mode), and checks that whichever holds control is
-// the only one whose typing reaches the shell, that the other's Ctrl-T is
-// refused rather than taking over, and that `yield` stops a native writer
-// on its next keystroke.
-func TestOnlyOneTerminalControlsAcrossOpenModes(t *testing.T) {
+// real `open` processes on two separate ptys and checks that whichever holds
+// control is the only one whose typing reaches the shell, that the other's
+// Ctrl-T is refused rather than taking over, and that `yield` puts the
+// writer back to watching.
+func TestOnlyOneTerminalControls(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux is not installed")
 	}
@@ -50,8 +49,8 @@ func TestOnlyOneTerminalControlsAcrossOpenModes(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = manager.Kill(context.Background(), name) })
 
-	plain := startOpen(t, binary, runtimeDir, "plain-tab", "open", name)
-	native := startOpen(t, binary, runtimeDir, "native-tab", "open", "--native", name)
+	first := startOpen(t, binary, runtimeDir, "first-tab", "open", name)
+	second := startOpen(t, binary, runtimeDir, "second-tab", "open", name)
 	time.Sleep(1500 * time.Millisecond)
 
 	owner := func() string {
@@ -78,59 +77,63 @@ func TestOnlyOneTerminalControlsAcrossOpenModes(t *testing.T) {
 		return strings.Contains(screen, marker)
 	}
 
-	// The plain tab takes control; the native tab's Ctrl-T is refused.
-	plain.write(t, "\x14")
+	// The first tab takes control; the second tab's Ctrl-T is refused.
+	first.write(t, "\x14")
 	settle()
-	if got := owner(); got != "plain-tab" {
-		t.Fatalf("after plain Ctrl-T: owner %q, want plain-tab", got)
+	if got := owner(); got != "first-tab" {
+		t.Fatalf("after first Ctrl-T: owner %q, want first-tab", got)
 	}
-	native.write(t, "\x14")
+	second.write(t, "\x14")
 	settle()
-	if got := owner(); got != "plain-tab" {
-		t.Fatalf("native Ctrl-T took control from a live holder: owner %q", got)
+	if got := owner(); got != "first-tab" {
+		t.Fatalf("second Ctrl-T took control from a live holder: owner %q", got)
 	}
-	if typed(native) {
-		t.Fatal("native tab typed into the session while the plain tab held control")
+	if typed(second) {
+		t.Fatal("second tab typed into the session while the first tab held control")
 	}
-	if !typed(plain) {
-		t.Fatal("the controlling plain tab could not type")
+	if !typed(first) {
+		t.Fatal("the controlling first tab could not type")
 	}
 
-	// Swap: plain releases, native takes, plain's Ctrl-T is refused.
-	plain.write(t, "\x14")
+	// Swap: first releases, second takes, first's Ctrl-T is refused.
+	first.write(t, "\x14")
 	settle()
 	if got := owner(); got != termshare.OwnerUnclaimed {
-		t.Fatalf("after plain released: owner %q, want unclaimed", got)
+		t.Fatalf("after first released: owner %q, want unclaimed", got)
 	}
-	native.write(t, "\x14")
+	second.write(t, "\x14")
 	settle()
-	if got := owner(); got != "native-tab" {
-		t.Fatalf("after native Ctrl-T: owner %q, want native-tab", got)
+	if got := owner(); got != "second-tab" {
+		t.Fatalf("after second Ctrl-T: owner %q, want second-tab", got)
 	}
-	plain.write(t, "\x14")
+	first.write(t, "\x14")
 	settle()
-	if got := owner(); got != "native-tab" {
-		t.Fatalf("plain Ctrl-T took control from a live holder: owner %q", got)
+	if got := owner(); got != "second-tab" {
+		t.Fatalf("first Ctrl-T took control from a live holder: owner %q", got)
 	}
-	if typed(plain) {
-		t.Fatal("plain tab typed into the session while the native tab held control")
+	if typed(first) {
+		t.Fatal("first tab typed into the session while the second tab held control")
 	}
-	if !typed(native) {
-		t.Fatal("the controlling native tab could not type")
+	if !typed(second) {
+		t.Fatal("the controlling second tab could not type")
 	}
 
-	// yield takes control away; the native tab's next keystrokes are dropped.
+	// yield takes control away; the second tab re-attaches read-only.
 	if err := manager.Yield(ctx, name); err != nil {
 		t.Fatal(err)
 	}
-	if typed(native) {
-		t.Fatal("native tab kept typing after yield")
+	settle()
+	if got := owner(); got != termshare.OwnerUnclaimed {
+		t.Fatalf("after yield: owner %q, want unclaimed", got)
+	}
+	if typed(second) {
+		t.Fatal("second tab kept typing after yield")
 	}
 
-	plain.write(t, "\x11")
-	native.write(t, "\x11")
-	plain.wait(t)
-	native.wait(t)
+	first.write(t, "\x11")
+	second.write(t, "\x11")
+	first.wait(t)
+	second.wait(t)
 }
 
 type openTab struct {

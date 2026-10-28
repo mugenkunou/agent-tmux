@@ -65,7 +65,7 @@ func createCommand() *command {
 		// From a real terminal, dropping straight into the session is what the
 		// user expects; scripted callers (no tty) can't attach and get the hint.
 		if stdinIsTerminal() {
-			return openSession(inv, name, false)
+			return openSession(inv, name)
 		}
 		fmt.Fprintf(inv.stdout, "open:  agent-tmux open %s   (Ctrl-T toggles watching/control, Ctrl-] menu)\n", name)
 		return 0
@@ -214,13 +214,12 @@ func takeCommand() *command {
 
 func openCommand() *command {
 	c := newCommand("open", "attach once; Ctrl-T toggles watching/control, Ctrl-] opens a menu (detach, kill, restart, Ctrl-C)")
-	native := c.fs.Bool("native", false, "show the session in this terminal's own screen, so mouse scrolling, selection and search work (experimental)")
 	c.args = []positional{sessionArg}
-	c.run = func(inv *invocation) int { return openSession(inv, inv.args[0], *native) }
+	c.run = func(inv *invocation) int { return openSession(inv, inv.args[0]) }
 	return c
 }
 
-func openSession(inv *invocation, name string, native bool) int {
+func openSession(inv *invocation, name string) int {
 	hooks := termshare.OpenHooks{
 		Phase: func(owner string) {
 			if owner == termshare.OwnerUnclaimed {
@@ -229,13 +228,9 @@ func openSession(inv *invocation, name string, native bool) int {
 				fmt.Fprintf(inv.stdout, "-- %s controls %s: Ctrl-T releases, Ctrl-Q exits, Ctrl-] menu --\n", owner, name)
 			}
 		},
-		Menu: func(readKey func() (byte, error)) bool { return escapeMenu(inv, name, readKey) },
+		Menu: func() bool { return escapeMenu(inv, name) },
 	}
-	open := inv.manager.Open
-	if native {
-		open = inv.manager.OpenNative
-	}
-	if err := open(inv.ctx, name, hooks); err != nil {
+	if err := inv.manager.Open(inv.ctx, name, hooks); err != nil {
 		return fail(inv.stderr, err)
 	}
 	return 0

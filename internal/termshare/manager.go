@@ -332,11 +332,10 @@ type OpenHooks struct {
 	// Phase is called as each attach starts: with OwnerUnclaimed when
 	// watching, with this process's actor id when controlling.
 	Phase func(owner string)
-	// Menu is called after Ctrl-], with control released and the terminal
-	// in a mode where output prints normally. It reads keypresses only
-	// through readKey. It returns true to end Open, false to go back to the
-	// phase Ctrl-] was pressed from.
-	Menu func(readKey func() (byte, error)) (leave bool)
+	// Menu is called after Ctrl-], with the terminal back in normal mode and
+	// control released. It returns true to end Open, false to re-attach in
+	// the phase Ctrl-] was pressed from.
+	Menu func() (leave bool)
 }
 
 // Open attaches once and loops between a genuinely read-only watching phase
@@ -391,7 +390,7 @@ func (m *Manager) Open(ctx context.Context, name string, hooks OpenHooks) error 
 		case exitToggle:
 			controlling = !controlling
 		case exitMenu:
-			if hooks.Menu != nil && hooks.Menu(func() (byte, error) { return ReadKey(os.Stdin) }) {
+			if hooks.Menu != nil && hooks.Menu() {
 				return nil
 			}
 		default:
@@ -445,9 +444,8 @@ func (m *Manager) Take(ctx context.Context, name string) error {
 }
 
 // Yield takes control away from whoever holds it, live or not, and puts
-// their writable tmux client back to watching (a plain `open` re-attaches
-// read-only; a native `open` checks ownership before every keystroke it
-// forwards). It is the manual override; normal handoffs never need it.
+// their writable tmux client back to watching (an `open` re-attaches
+// read-only). It is the manual override; normal handoffs never need it.
 func (m *Manager) Yield(ctx context.Context, name string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
@@ -463,18 +461,18 @@ func (m *Manager) Yield(ctx context.Context, name string) error {
 	})
 }
 
-// detachWriters ends every writable, non-control tmux client on the
-// session with exitToggle, so a plain `open` holding it falls back to
-// watching. The caller holds the session lock.
+// detachWriters ends every writable tmux client on the session with
+// exitToggle, so an `open` holding it falls back to watching. The caller
+// holds the session lock.
 func (m *Manager) detachWriters(ctx context.Context, name string) error {
 	out, err := m.run(ctx, nil, "list-clients", "-t", exact(name), "-F",
-		"#{client_name}\t#{client_readonly}\t#{client_control_mode}")
+		"#{client_name}\t#{client_readonly}")
 	if err != nil {
 		return err
 	}
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		fields := strings.Split(line, "\t")
-		if len(fields) != 3 || fields[1] == "1" || fields[2] == "1" {
+		if len(fields) != 2 || fields[1] == "1" {
 			continue
 		}
 		_, _ = m.run(ctx, nil, "detach-client", "-t", fields[0], "-E", "exit "+strconv.Itoa(exitToggle))
@@ -513,9 +511,8 @@ func (m *Manager) Kill(ctx context.Context, name string) error {
 //
 // Claims are exclusive: while another live process holds control, claim
 // fails with ErrControlled. This is the rule that keeps two attached
-// terminals (in any mix of plain and native open, or take) from typing into
-// the session at once. Re-claiming from the process that already holds it
-// succeeds.
+// terminals (any mix of open and take) from typing into the session at
+// once. Re-claiming from the process that already holds it succeeds.
 func (m *Manager) claim(ctx context.Context, name, actorID, tty string) error {
 	if actorID == "" {
 		return errors.New("actor id cannot be empty")
@@ -580,19 +577,6 @@ func (m *Manager) readOwner(ctx context.Context, name string) (owner, proc strin
 	}
 	owner, proc, _ = strings.Cut(strings.TrimRight(raw, "\n"), "\t")
 	return owner, proc, nil
-}
-
-// holdsControl reports whether this process currently owns the session.
-func (m *Manager) holdsControl(ctx context.Context, name string) (owner string, held bool, err error) {
-	var proc string
-	owner, proc, err = m.readOwner(ctx, name)
-	if err != nil {
-		return "", false, err
-	}
-	if owner != OwnerUnclaimed && claimStale(proc) {
-		owner = OwnerUnclaimed
-	}
-	return owner, owner != OwnerUnclaimed && proc == processIdentity(os.Getpid()), nil
 }
 
 // clearOwner does release's work; the caller holds the session lock.
