@@ -32,7 +32,7 @@ This protects the terminal's live input channel at the moment something needs a 
    (`agent-tmux create <session>` attaches the same way when the user runs it from
    their own terminal; only a scripted caller without a terminal stays detached.)
 
-   It attaches once, in the same terminal tab, starting unclaimed (watch-only). Pressing `Ctrl-T` claims control instantly for whoever is attached; pressing `Ctrl-T` again releases it. `Ctrl-Q` exits `open` and returns their terminal to a normal prompt without ending the session (press `Ctrl-T` first if currently watching). No second tab and no separate `take`/`yield` commands are needed for routine handoffs.
+   It attaches once, in the same terminal tab, starting unclaimed (watch-only). Pressing `Ctrl-T` claims control instantly for whoever is attached; pressing `Ctrl-T` again releases it. `Ctrl-Q` exits `open` and returns their terminal to a normal prompt without ending the session. `Ctrl-]` opens a menu (detach, kill session, restart shell, send Ctrl-C) for when the session is stuck. No second tab and no separate `take`/`yield` commands are needed for routine handoffs.
 
 ## Running Commands
 
@@ -159,13 +159,15 @@ this is expected and procedural):
     plain text, fall back to the same `open` + `Ctrl-T` handoff as 3a.
 5.  Never proceed past a destructive-looking prompt on an assumption.
 
-If ownership is stuck on a claimed value outside of `open` (for example after an interrupted `take`), ask the user to run:
+A claim whose process has died is cleared automatically. If ownership is still stuck on a claimed value outside of `open`, ask the user to run:
 
 ```bash
 agent-tmux yield <session>
 ```
 
 Never bypass a session whose `owner` is claimed by invoking tmux directly.
+
+If a program in the session stops responding even to `agent-tmux key <session> C-c` (for example, an ssh connection frozen by a network drop), `agent-tmux restart <session>` kills it and starts a fresh shell in the same session. That loses the remote connection and any state in it, so ask the user first.
 
 `watch` (read-only attach) and `take`/`yield` (manual detach-based handoff) remain available for advanced or scripted use, but `open` is the default recommendation because it needs no second tab and no manual command between watching and controlling.
 

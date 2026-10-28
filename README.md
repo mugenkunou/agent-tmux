@@ -97,9 +97,32 @@ UNCLAIMED work            CONTROLLED BY <actor> work
 Ctrl-T claims  ───────> Ctrl-T releases
         ▲                        │
         └────────────────────────┘
-                Ctrl-Q (from either phase; press Ctrl-T
-                first if currently unclaimed) exits open
+      Ctrl-Q exits open, Ctrl-] opens the menu (both from either phase)
 ```
+
+### When the session is stuck
+
+`Ctrl-]` always gets you out, whether you are watching or in control and however
+frozen the program in the session is (an ssh connection hung by a network drop, a
+program ignoring Ctrl-C). It leaves tmux and shows a one-line menu:
+
+```text
+agent-tmux work: [d]etach  [k]ill session  [r]estart shell  [c] send Ctrl-C  [any other key] back
+```
+
+- `d` leaves `open`; the session keeps running.
+- `k` kills the whole session (asks first).
+- `r` kills whatever runs in the session and starts a fresh shell in its place, keeping
+  the session and its name (asks first). The same thing from another terminal:
+  `agent-tmux restart work`.
+- `c` sends Ctrl-C to the session, then returns to it.
+
+Any other key returns to the session. Control is always released before the menu
+shows, so the agent is never locked out while you decide.
+
+Closing the terminal tab while in control releases control too. If the `open` or
+`take` process dies without releasing (killed, crashed), the claim is treated as stale
+and cleared the next time a scripted caller sends input or anyone runs `status`.
 
 When SSH requests a password or TOTP, whoever is watching presses `Ctrl-T`, types the secret, and presses `Ctrl-T` again. Scripted callers can resume in the same authenticated shell once ownership clears.
 
@@ -125,7 +148,8 @@ scripted caller writes ──> password prompt ──> take claims ──> authe
      └────────────── same shell, same SSH connection <─────────────┘
 ```
 
-If takeover is interrupted instead of cleanly detached:
+If takeover is interrupted instead of cleanly detached (only needed when the claiming
+process is somehow still alive, since a dead claimant's claim is cleared automatically):
 
 ```bash
 agent-tmux yield work
@@ -146,16 +170,15 @@ agent-tmux kill work
 | `key` | Send keys such as `C-c`, `C-z`, or `Escape` |
 | `screen` | Read the current rendered terminal |
 | `wait` | Wait until expected text appears |
-| `open` | Attach once; `Ctrl-T` toggles unclaimed/claimed in the same tab |
+| `open` | Attach once; `Ctrl-T` toggles unclaimed/claimed, `Ctrl-Q` exits, `Ctrl-]` opens the menu |
 | `watch` | Attach a read-only terminal |
 | `take` | Claim ownership and attach a writable terminal |
 | `yield` | Clear the current owner |
 | `status` / `list` | Inspect sessions and their current owner |
+| `restart` | Kill whatever runs in a session (e.g. a frozen ssh) and start a fresh shell in its place |
 | `kill` | Terminate a session |
 | `completion` | Print the shell completion script for `bash`, `zsh` or `fish` |
 | `skill` | Print `SKILL.md`, matching this binary, for a skill manager to keep |
-
-`open` currently needs one `Ctrl-T` before `Ctrl-Q` if the session is unclaimed, since tmux discards any bound command chain other than a bare `detach-client`/`switch-client` while a client is read-only — `Ctrl-Q` sets the quit flag as part of a chain, which only reliably fires once the client is writable.
 
 ## Agent Integration
 
@@ -219,8 +242,9 @@ There is no built-in notion of "agent" versus "human" — only whether a session
 - Only the current owner may write through `agent-tmux`; scripted `send`/`key` calls are refused while any actor holds ownership (`status` shows who).
 - `take` and `open`'s control phase atomically set the owner to an actor id before attaching.
 - Scripted writes attempted while someone else owns the session fail instead of being queued.
-- `Ctrl-T` is bound once, server-wide, to `detach-client` — the one command tmux still honors for a read-only client. `open` alternates read-only and writable `attach-session` calls around that single detach point, claiming/releasing ownership on each transition.
-- Detaching from `take`, or either phase of `open`, clears the owner back to unclaimed.
+- `Ctrl-T`, `Ctrl-Q` and `Ctrl-]` are bound server-wide to `detach-client -E 'exit N'`, a different N per key. `detach-client` is the one command tmux still honors for a read-only client, and the client's exit code tells `open` which key was pressed. `open` alternates read-only and writable `attach-session` calls around those detach points, claiming/releasing ownership on each transition.
+- Detaching from `take`, or either phase of `open`, clears the owner back to unclaimed. So does closing the tab: `open`/`take` survive the hangup long enough to release.
+- A claim records the claiming process (pid and start time). If that process is gone, the claim is stale: `send`/`key` clear it instead of refusing, and `status`/`list` show the session as unclaimed.
 
 ### Actor identity
 

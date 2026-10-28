@@ -29,6 +29,7 @@ func commands() []*command {
 		takeCommand(),
 		openCommand(),
 		yieldCommand(),
+		restartCommand(),
 		killCommand(),
 		doctorCommand(),
 		completionCommand(),
@@ -65,7 +66,7 @@ func createCommand() *command {
 		if stdinIsTerminal() {
 			return openSession(inv, name)
 		}
-		fmt.Fprintf(inv.stdout, "open:  agent-tmux open %s   (Ctrl-T toggles watching/control)\n", name)
+		fmt.Fprintf(inv.stdout, "open:  agent-tmux open %s   (Ctrl-T toggles watching/control, Ctrl-] menu)\n", name)
 		return 0
 	}
 	return c
@@ -211,21 +212,24 @@ func takeCommand() *command {
 }
 
 func openCommand() *command {
-	c := newCommand("open", "attach once; Ctrl-T toggles watching/control in the same terminal")
+	c := newCommand("open", "attach once; Ctrl-T toggles watching/control, Ctrl-] opens a menu (detach, kill, restart, Ctrl-C)")
 	c.args = []positional{sessionArg}
 	c.run = func(inv *invocation) int { return openSession(inv, inv.args[0]) }
 	return c
 }
 
 func openSession(inv *invocation, name string) int {
-	onPhase := func(owner string) {
-		if owner == termshare.OwnerUnclaimed {
-			fmt.Fprintf(inv.stdout, "-- watching %s: press Ctrl-T to take control --\n", name)
-		} else {
-			fmt.Fprintf(inv.stdout, "-- %s controls %s: press Ctrl-T to release, Ctrl-Q to exit --\n", owner, name)
-		}
+	hooks := termshare.OpenHooks{
+		Phase: func(owner string) {
+			if owner == termshare.OwnerUnclaimed {
+				fmt.Fprintf(inv.stdout, "-- watching %s: Ctrl-T takes control, Ctrl-Q exits, Ctrl-] menu --\n", name)
+			} else {
+				fmt.Fprintf(inv.stdout, "-- %s controls %s: Ctrl-T releases, Ctrl-Q exits, Ctrl-] menu --\n", owner, name)
+			}
+		},
+		Menu: func() bool { return escapeMenu(inv, name) },
 	}
-	if err := inv.manager.Open(inv.ctx, name, onPhase); err != nil {
+	if err := inv.manager.Open(inv.ctx, name, hooks); err != nil {
 		return fail(inv.stderr, err)
 	}
 	return 0
@@ -239,6 +243,19 @@ func yieldCommand() *command {
 			return fail(inv.stderr, err)
 		}
 		fmt.Fprintf(inv.stdout, "%s is unclaimed; scripted send calls are allowed again\n", inv.args[0])
+		return 0
+	}
+	return c
+}
+
+func restartCommand() *command {
+	c := newCommand("restart", "kill whatever runs in a session (e.g. a frozen ssh) and start a fresh shell in its place")
+	c.args = []positional{sessionArg}
+	c.run = func(inv *invocation) int {
+		if err := inv.manager.Restart(inv.ctx, inv.args[0]); err != nil {
+			return fail(inv.stderr, err)
+		}
+		fmt.Fprintf(inv.stdout, "restarted the shell in %s\n", inv.args[0])
 		return 0
 	}
 	return c

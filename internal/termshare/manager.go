@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -38,8 +39,31 @@ var (
 // true/false separators of the surrounding `#{?cond,true,false}`, which
 // silently drops the entire banner instead of raising a parse error.
 const statusRightFormat = " #{?#{==:#{@agent-tmux-owner},}" +
-	",#[bg=colour4]#[fg=black] OPEN - Ctrl-T takes control #[default]" +
-	",#[bg=colour2]#[fg=black] CONTROLLED BY #{@agent-tmux-owner} - Ctrl-T releases #[default]} "
+	",#[bg=colour4]#[fg=black] OPEN - Ctrl-T takes control - Ctrl-] menu #[default]" +
+	",#[bg=colour2]#[fg=black] CONTROLLED BY #{@agent-tmux-owner} - Ctrl-T releases - Ctrl-] menu #[default]} "
+
+// Exit codes an attached tmux client ends with. Each key Open listens for is
+// bound to `detach-client -E 'exit N'`: tmux honors detach-client even for a
+// read-only client, and -E makes the client exit with N, so the caller learns
+// which key ended the attach without any side channel. Any other detach
+// (another process detached the client, the session was killed) exits 0.
+const (
+	exitDetached = 0
+	exitToggle   = 10 // Ctrl-T: switch between watching and controlling
+	exitQuit     = 11 // Ctrl-Q: leave open, keep the session
+	exitMenu     = 12 // Ctrl-]: the escape menu
+)
+
+// keyBindings are the server-wide keys, installed by every attaching command
+// so a server started by an older version picks up the current ones.
+var keyBindings = []struct {
+	key  string
+	exit int
+}{
+	{"C-t", exitToggle},
+	{"C-q", exitQuit},
+	{"C-]", exitMenu},
+}
 
 // titleFormat is the terminal tab/window title shown while attached, so the
 // right tab is findable among many and its state is visible without looking
@@ -133,13 +157,11 @@ func (m *Manager) Create(ctx context.Context, name, shell string, cols, rows int
 		settings := [][2]string{
 			{"@agent-tmux-owner", OwnerUnclaimed},
 			{"@agent-tmux-owner-tty", ""},
+			{"@agent-tmux-owner-proc", ""},
 			{"@agent-tmux-generation", "1"},
-			{"@agent-tmux-quit", "0"},
 			{"@agent-tmux-created", time.Now().UTC().Format(time.RFC3339)},
 			{"status-left", " agent-tmux:#S "},
 			{"status-left-length", "40"},
-			{"status-right", statusRightFormat},
-			{"status-right-length", "60"},
 		}
 		for _, setting := range settings {
 			if _, err := m.run(ctx, nil, "set-option", "-t", exact(name), setting[0], setting[1]); err != nil {
@@ -278,118 +300,120 @@ func (m *Manager) Watch(ctx context.Context, name string) error {
 	if err := m.requireSession(ctx, name); err != nil {
 		return err
 	}
+	if err := m.ensureBindings(ctx); err != nil {
+		return err
+	}
 	defer preserveTerminalTitle(os.Stdout)()
-	return m.attach(ctx, name, true)
+	_, err := m.attach(ctx, name, true)
+	return err
 }
 
-// Open attaches once and loops between a genuinely read-only observing phase
-// and a writable controlling phase, toggled by the single Ctrl-T binding
-// (bound to detach-client, which tmux honors even for read-only clients).
-// onPhase is called with OwnerUnclaimed when the observing phase starts and
-// with this process's own actor id when the controlling phase starts.
-// Ctrl-Q ends the loop and returns control to the agent; it is only honored
-// while the writable phase is active (see ensureToggleBinding), so quitting
-// from the locked phase needs one Ctrl-T first. Closing the terminal or
-// killing the session also ends the loop.
-func (m *Manager) Open(ctx context.Context, name string, onPhase func(owner string)) error {
+// OpenHooks lets the caller show what Open is doing. Both are optional.
+type OpenHooks struct {
+	// Phase is called as each attach starts: with OwnerUnclaimed when
+	// watching, with this process's actor id when controlling.
+	Phase func(owner string)
+	// Menu is called after Ctrl-], with the terminal back in normal mode and
+	// control released. It returns true to end Open, false to re-attach in
+	// the phase Ctrl-] was pressed from.
+	Menu func() (leave bool)
+}
+
+// Open attaches once and loops between a genuinely read-only watching phase
+// and a writable controlling phase. Ctrl-T toggles between them, Ctrl-Q ends
+// Open, and Ctrl-] hands over to hooks.Menu; all three work from either
+// phase (see keyBindings). Closing the terminal or killing the session also
+// ends the loop, and control is always released when the writable attach
+// ends, however it ends.
+func (m *Manager) Open(ctx context.Context, name string, hooks OpenHooks) error {
 	if err := m.requireSession(ctx, name); err != nil {
 		return err
 	}
-	if err := m.ensureToggleBinding(ctx); err != nil {
+	if err := m.ensureBindings(ctx); err != nil {
 		return err
 	}
 	if err := m.release(ctx, name); err != nil {
 		return err
 	}
 	defer preserveTerminalTitle(os.Stdout)()
-	if err := m.clearQuitFlag(ctx, name); err != nil {
-		return err
-	}
+	defer surviveHangup()()
 
 	id := actorID()
 	tty := currentTTY()
-
+	controlling := false
 	for {
 		if exists, err := m.HasSession(ctx, name); err != nil {
 			return err
 		} else if !exists {
 			return nil
 		}
-		if onPhase != nil {
-			onPhase(OwnerUnclaimed)
+		owner := OwnerUnclaimed
+		if controlling {
+			if err := m.claim(ctx, name, id, tty); err != nil {
+				return err
+			}
+			owner = id
 		}
-		if err := m.attach(ctx, name, true); err != nil {
-			return err
+		if hooks.Phase != nil {
+			hooks.Phase(owner)
 		}
-		if quit, err := m.quitRequested(ctx, name); err != nil {
-			return err
-		} else if quit {
-			return m.clearQuitFlag(context.Background(), name)
+		code, attachErr := m.attach(ctx, name, !controlling)
+		if controlling {
+			_ = m.release(context.Background(), name)
 		}
-
-		if exists, err := m.HasSession(ctx, name); err != nil {
-			return err
-		} else if !exists {
-			return nil
-		}
-		if err := m.claim(ctx, name, id, tty); err != nil {
-			return err
-		}
-		if onPhase != nil {
-			onPhase(id)
-		}
-		attachErr := m.attach(ctx, name, false)
-		_ = m.release(context.Background(), name)
 		if attachErr != nil {
 			return attachErr
 		}
-		if quit, err := m.quitRequested(ctx, name); err != nil {
-			return err
-		} else if quit {
-			return m.clearQuitFlag(context.Background(), name)
+		switch code {
+		case exitToggle:
+			controlling = !controlling
+		case exitMenu:
+			if hooks.Menu != nil && hooks.Menu() {
+				return nil
+			}
+		default:
+			return nil
 		}
 	}
 }
 
-// quitRequested reports whether Ctrl-Q asked Open to end its loop.
-func (m *Manager) quitRequested(ctx context.Context, name string) (bool, error) {
-	output, err := m.run(ctx, nil, "show-option", "-qv", "-t", exact(name), "@agent-tmux-quit")
-	if err != nil {
-		return false, err
+// ensureBindings installs keyBindings server-wide. A binding must be a bare
+// detach-client to fire for a read-only client (a chained command list is
+// dropped whole), which is why each key reports itself through the client's
+// exit code instead of setting state.
+func (m *Manager) ensureBindings(ctx context.Context) error {
+	for _, binding := range keyBindings {
+		if _, err := m.run(ctx, nil, "bind-key", "-n", binding.key,
+			"detach-client", "-E", "exit "+strconv.Itoa(binding.exit)); err != nil {
+			return err
+		}
 	}
-	return strings.TrimSpace(output) == "1", nil
+	return nil
 }
 
-func (m *Manager) clearQuitFlag(ctx context.Context, name string) error {
-	_, err := m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-quit", "0")
-	return err
-}
-
-// ensureToggleBinding installs the two global keys attached clients use.
-// Ctrl-T ends the current attach-session call regardless of read-only
-// state, since detach-client is one of the two commands tmux still honors
-// for a read-only client (Open supplies the actual lock/unlock semantics by
-// re-attaching afterward). Ctrl-Q additionally marks the session's quit flag
-// before detaching; tmux discards a bound command list wholesale unless it
-// is purely detach-client or switch-client, so the quit mark is only
-// reliably honored while the client is writable.
-func (m *Manager) ensureToggleBinding(ctx context.Context) error {
-	if _, err := m.run(ctx, nil, "bind-key", "-n", "C-t", "detach-client"); err != nil {
-		return err
-	}
-	_, err := m.run(ctx, nil, "bind-key", "-n", "C-q",
-		"set-option -t '#{session_name}' @agent-tmux-quit 1 ; detach-client")
-	return err
+// surviveHangup keeps this process alive through SIGHUP while a client is
+// attached. Closing the terminal tab hangs up both this process and its tmux
+// client; the client exits, and this process lives long enough to release
+// the control it holds instead of dying with it. The returned function
+// restores the default handling.
+func surviveHangup() (restore func()) {
+	hangup := make(chan os.Signal, 1)
+	signal.Notify(hangup, syscall.SIGHUP)
+	return func() { signal.Stop(hangup) }
 }
 
 func (m *Manager) Take(ctx context.Context, name string) error {
 	id := actorID()
 	tty := currentTTY()
+	if err := m.ensureBindings(ctx); err != nil {
+		return err
+	}
 	if err := m.claim(ctx, name, id, tty); err != nil {
 		return err
 	}
 	defer preserveTerminalTitle(os.Stdout)()
-	attachErr := m.attach(ctx, name, false)
+	defer surviveHangup()()
+	_, attachErr := m.attach(ctx, name, false)
 	releaseErr := m.release(context.Background(), name)
 	if attachErr != nil {
 		return attachErr
@@ -399,6 +423,18 @@ func (m *Manager) Take(ctx context.Context, name string) error {
 
 func (m *Manager) Yield(ctx context.Context, name string) error {
 	return m.release(ctx, name)
+}
+
+// Restart kills whatever runs in the session's pane and starts the session's
+// shell again in its place. The session, its name and its attached clients
+// stay. It is the way out of a program that Ctrl-C cannot reach, such as an
+// ssh connection frozen by a network drop.
+func (m *Manager) Restart(ctx context.Context, name string) error {
+	if err := m.requireSession(ctx, name); err != nil {
+		return err
+	}
+	_, err := m.run(ctx, nil, "respawn-pane", "-k", "-t", target(name))
+	return err
 }
 
 func (m *Manager) Kill(ctx context.Context, name string) error {
@@ -414,7 +450,9 @@ func (m *Manager) Kill(ctx context.Context, name string) error {
 
 // claim records actorID (and its best-effort tty, for the audit trail) as
 // the session's owner, so scripted Send/SendKeys calls are
-// refused until release runs.
+// refused until release runs. It also records this process's identity: if
+// the process goes away without releasing (killed, or its terminal closed
+// before it could), the claim is stale and withAgentControl clears it.
 func (m *Manager) claim(ctx context.Context, name, actorID, tty string) error {
 	if actorID == "" {
 		return errors.New("actor id cannot be empty")
@@ -433,6 +471,9 @@ func (m *Manager) claim(ctx context.Context, name, actorID, tty string) error {
 		if _, err := m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-owner-tty", tty); err != nil {
 			return err
 		}
+		if _, err := m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-owner-proc", processIdentity(os.Getpid())); err != nil {
+			return err
+		}
 		_, err := m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-generation", strconv.Itoa(generation+1))
 		return err
 	})
@@ -447,16 +488,20 @@ func (m *Manager) release(ctx context.Context, name string) error {
 		if err := m.requireSession(ctx, name); err != nil {
 			return err
 		}
-		generation := m.readGeneration(ctx, name)
-		if _, err := m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-owner", OwnerUnclaimed); err != nil {
-			return err
-		}
-		if _, err := m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-owner-tty", ""); err != nil {
-			return err
-		}
-		_, err := m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-generation", strconv.Itoa(generation+1))
-		return err
+		return m.clearOwner(ctx, name)
 	})
+}
+
+// clearOwner does release's work; the caller holds the session lock.
+func (m *Manager) clearOwner(ctx context.Context, name string) error {
+	generation := m.readGeneration(ctx, name)
+	for _, option := range []string{"@agent-tmux-owner", "@agent-tmux-owner-tty", "@agent-tmux-owner-proc"} {
+		if _, err := m.run(ctx, nil, "set-option", "-t", exact(name), option, ""); err != nil {
+			return err
+		}
+	}
+	_, err := m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-generation", strconv.Itoa(generation+1))
+	return err
 }
 
 func (m *Manager) readGeneration(ctx context.Context, name string) int {
@@ -475,11 +520,20 @@ func (m *Manager) withAgentControl(ctx context.Context, name string, action func
 		if err := m.requireSession(ctx, name); err != nil {
 			return err
 		}
-		rawOwner, err := m.run(ctx, nil, "show-option", "-qv", "-t", exact(name), "@agent-tmux-owner")
+		raw, err := m.run(ctx, nil, "display-message", "-p", "-t", target(name), "#{@agent-tmux-owner}\t#{@agent-tmux-owner-proc}")
 		if err != nil {
 			return err
 		}
-		if owner := strings.TrimSpace(rawOwner); owner != OwnerUnclaimed {
+		owner, proc, _ := strings.Cut(strings.TrimRight(raw, "\n"), "\t")
+		if owner != OwnerUnclaimed && claimStale(proc) {
+			// Whoever claimed control is gone without releasing it (for
+			// example, its terminal tab was closed): nobody can be typing.
+			if err := m.clearOwner(ctx, name); err != nil {
+				return err
+			}
+			owner = OwnerUnclaimed
+		}
+		if owner != OwnerUnclaimed {
 			return fmt.Errorf("actor %q controls the terminal: %w", owner, ErrControlled)
 		}
 		return action()
@@ -520,12 +574,18 @@ func preserveTerminalTitle(w *os.File) (restore func()) {
 	return func() { _, _ = w.WriteString(popTitle) }
 }
 
-// applyTitle makes tmux set the attached terminal's title from titleFormat.
-// It is applied on every attach rather than only in Create so sessions made by
-// an older version pick it up too; set-option is idempotent. tmux re-expands
-// the format on redraw, so the title tracks ownership changes.
-func (m *Manager) applyTitle(ctx context.Context, name string) error {
-	for _, setting := range [][2]string{{"set-titles", "on"}, {"set-titles-string", titleFormat}} {
+// applyClientOptions sets what an attached client shows: the terminal title
+// from titleFormat and the ownership banner from statusRightFormat. It runs on
+// every attach rather than only in Create so sessions made by an older
+// version pick up the current text too; set-option is idempotent. tmux
+// re-expands both formats on redraw, so they track ownership changes.
+func (m *Manager) applyClientOptions(ctx context.Context, name string) error {
+	for _, setting := range [][2]string{
+		{"set-titles", "on"},
+		{"set-titles-string", titleFormat},
+		{"status-right", statusRightFormat},
+		{"status-right-length", "90"},
+	} {
 		if _, err := m.run(ctx, nil, "set-option", "-t", exact(name), setting[0], setting[1]); err != nil {
 			return err
 		}
@@ -533,9 +593,12 @@ func (m *Manager) applyTitle(ctx context.Context, name string) error {
 	return nil
 }
 
-func (m *Manager) attach(ctx context.Context, name string, readOnly bool) error {
-	if err := m.applyTitle(ctx, name); err != nil {
-		return err
+// attach runs a tmux client on this terminal until it ends, and returns the
+// exit code naming the key that ended it (see exitToggle and friends), or
+// exitDetached for any other clean detach.
+func (m *Manager) attach(ctx context.Context, name string, readOnly bool) (int, error) {
+	if err := m.applyClientOptions(ctx, name); err != nil {
+		return 0, err
 	}
 	args := m.baseArgs()
 	args = append(args, "attach-session")
@@ -548,10 +611,28 @@ func (m *Manager) attach(ctx context.Context, name string, readOnly bool) error 
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = withoutEnv(os.Environ(), "TMUX")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("attach to %q: %w", name, err)
+	code, err := attachExit(cmd.Run())
+	if err != nil {
+		return 0, fmt.Errorf("attach to %q: %w", name, err)
 	}
-	return nil
+	return code, nil
+}
+
+// attachExit turns a finished tmux client's error into the key exit code it
+// carries, or passes a genuine failure through.
+func attachExit(err error) (int, error) {
+	if err == nil {
+		return exitDetached, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		for _, binding := range keyBindings {
+			if exitErr.ExitCode() == binding.exit {
+				return binding.exit, nil
+			}
+		}
+	}
+	return 0, err
 }
 
 func (m *Manager) withLock(name string, action func() error) error {
@@ -623,7 +704,44 @@ func target(name string) string {
 }
 
 func sessionFormat() string {
-	return "#{session_name}\t#{@agent-tmux-owner}\t#{session_attached}\t#{pane_current_command}\t#{pane_current_path}"
+	return "#{session_name}\t#{@agent-tmux-owner}\t#{session_attached}\t#{pane_current_command}\t#{pane_current_path}\t#{@agent-tmux-owner-proc}"
+}
+
+// processIdentity names a running process as "<pid>:<start time>", so a pid
+// later reused by an unrelated process does not pass for the original. It
+// is empty when the process does not exist or has already exited.
+func processIdentity(pid int) string {
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return ""
+	}
+	// The command name (field 2) is parenthesised and may contain spaces;
+	// the fields after its closing paren start at field 3, and the start
+	// time is field 22.
+	closing := bytes.LastIndexByte(stat, ')')
+	if closing < 0 {
+		return ""
+	}
+	fields := strings.Fields(string(stat[closing+1:]))
+	if len(fields) < 20 || fields[0] == "Z" {
+		// A zombie has exited; only its parent has not collected it yet.
+		return ""
+	}
+	return strconv.Itoa(pid) + ":" + fields[19]
+}
+
+// claimStale reports whether the process recorded by claim is gone. A claim
+// with no recorded process (made by an older version) is never stale.
+func claimStale(proc string) bool {
+	if proc == "" {
+		return false
+	}
+	pidText, _, _ := strings.Cut(proc, ":")
+	pid, err := strconv.Atoi(pidText)
+	if err != nil {
+		return false
+	}
+	return processIdentity(pid) != proc
 }
 
 // actorID identifies the caller for ownership purposes. Set
@@ -658,24 +776,30 @@ func currentTTY() string {
 }
 
 func parseSessions(output string) ([]Session, error) {
-	output = strings.TrimSpace(output)
+	// Trim only line breaks: the last field may be empty, and TrimSpace
+	// would eat the tab in front of it.
+	output = strings.Trim(output, "\r\n")
 	if output == "" {
 		return nil, nil
 	}
 	lines := strings.Split(output, "\n")
 	sessions := make([]Session, 0, len(lines))
 	for _, line := range lines {
-		fields := strings.SplitN(line, "\t", 5)
-		if len(fields) != 5 {
+		fields := strings.SplitN(line, "\t", 6)
+		if len(fields) != 6 {
 			return nil, fmt.Errorf("cannot parse tmux session response %q", line)
 		}
 		clients, err := strconv.Atoi(fields[2])
 		if err != nil {
 			return nil, fmt.Errorf("cannot parse client count %q: %w", fields[2], err)
 		}
+		owner := fields[1]
+		if claimStale(fields[5]) {
+			owner = OwnerUnclaimed
+		}
 		sessions = append(sessions, Session{
 			Name:    fields[0],
-			Owner:   fields[1],
+			Owner:   owner,
 			Clients: clients,
 			Command: fields[3],
 			Path:    fields[4],

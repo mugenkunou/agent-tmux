@@ -109,7 +109,24 @@ reach the pane.
 Q: While a client is read-only, which bound commands still fire?
 A: Only `detach-client` and `switch-client` — as a whole binding. A chain like
 `set-option ...; detach-client` does **nothing** while read-only; it only fires once
-writable.
+writable. `run-shell`, `set-option`, `copy-mode` and mouse events (even with
+`mouse on`) are all ignored for a read-only client (verified, tmux 3.4).
+
+Q: How can a read-only client say *which* key detached it, then?
+A: `detach-client -E 'exit N'` fires from a read-only client, and the `tmux attach`
+process exits with status N (verified: 10/11/12 for three keys, from both phases).
+A detach for any other reason (another process detached the client, the session was
+killed) exits 0. This is how `open` tells Ctrl-T, Ctrl-Q and Ctrl-] apart with no
+side channel; it replaced the old `@agent-tmux-quit` flag.
+
+Q: Does `respawn-pane -k` with no command restart the pane's original command?
+A: Yes — it reuses `#{pane_start_command}` (the `exec <shell> -l` from `create`), and
+the session, its name and attached clients are untouched. This is `restart`.
+
+Q: Does a scripted `send-keys` still work while the pane is in copy-mode?
+A: No — the keys go to copy-mode, and with a client attached `send-keys -l` was seen
+to **hang** for more than 5 s. Never put the shared pane into copy-mode for one
+viewer's scrolling.
 
 Q: Why did the colored status banner render as nothing?
 A: A comma inside a `#[...]` style tag (`#[bg=colour2,fg=black]`) is
@@ -156,24 +173,27 @@ A: Loop: `attach -r` (blocks typing) → `Ctrl-T` → `detach-client` fires (alw
 honored) → wrapper claims ownership → `attach` writable → user types → `Ctrl-T` again
 → detach → wrapper releases ownership → loop back to read-only.
 
-Q: What are the two global keybindings, exactly?
+Q: What are the global keybindings, exactly?
 A:
 
 ```text
-bind-key -n C-t detach-client
-bind-key -n C-q "set-option -t '#{session_name}' @agent-tmux-quit 1 ; detach-client"
+bind-key -n C-t detach-client -E 'exit 10'    # toggle watching/controlling
+bind-key -n C-q detach-client -E 'exit 11'    # leave open, keep the session
+bind-key -n C-] detach-client -E 'exit 12'    # escape menu
 ```
 
-- `Ctrl-T` is the toggle. It is *always* just `detach-client` — nothing else — which is
-  exactly why it works identically whether the client is currently read-only or
-  writable (§4.2).
-- `Ctrl-Q` requests the loop actually end (return to a normal shell prompt, without
-  killing the session). Because it's a *chain*, it is **only reliably honored while the
-  client is writable** (§4.2) — from the read-only/unclaimed phase you must press
-  `Ctrl-T` once first, then `Ctrl-Q`. This is a known, documented, accepted limitation,
-  not a bug to "fix" without solving the underlying tmux restriction in §4.2.
-- The Go wrapper checks the `@agent-tmux-quit` flag after every phase and exits the
-  loop (clearing the flag) when it's set.
+- Each is a bare `detach-client`, so all three work identically whether the client is
+  read-only or writable (§4.2). The exit code tells the Go loop which key it was.
+- Every attaching command (`open`, `watch`, `take`) re-installs them, so a server
+  started by an older version gets the current bindings.
+- `Ctrl-]` (the telnet/virsh console escape, almost never used by inner programs)
+  leaves tmux with control already released and shows a one-line menu outside tmux:
+  `[d]etach  [k]ill session  [r]estart shell  [c] send Ctrl-C  [any other key] back`.
+  Because it runs with tmux detached, it works however frozen the pane's program is.
+  Kill and restart ask y/N first.
+- History: an earlier `Ctrl-Q` was a `set-option …; detach-client` chain, which only
+  fired from the writable phase (users had to press Ctrl-T first). The exit-code
+  approach removed that limitation.
 
 ## 6. The Ownership / Identity Model
 
@@ -200,8 +220,16 @@ which briefly hold an ownership claim.
 - **`@agent-tmux-owner-tty`**: best-effort, kernel-verified corroborating evidence
   (`/proc/self/fd/0` symlink target) recorded alongside the self-reported actor id, for
   an audit trail. Not used for enforcement, just visibility.
+- **`@agent-tmux-owner-proc`**: the claiming process as `<pid>:<start time>` (start
+  time from `/proc/<pid>/stat`, so a reused pid doesn't pass for it). If that process
+  is gone or a zombie, the claim is **stale**: `send`/`key` clear it under the session
+  lock instead of refusing, and `status`/`list` show the session as unclaimed. A claim
+  with no recorded process (from an older version) is never treated as stale.
+- **Closing the tab while in control**: `open`/`take` catch SIGHUP while attached, so
+  when the terminal hangs up, the tmux client exits and the wrapper lives long enough
+  to release. The stale-claim check covers what this can't (SIGKILL, crash).
 - **`@agent-tmux-generation`**: monotonically incremented on every claim/release.
-  Reserved for future staleness detection; not currently checked by anything.
+  Not checked by anything yet.
 - **Trust model, stated explicitly:** this is *cooperative isolation, not a sandbox*.
   The socket directory is mode `0700` (same Unix user only) — that is the entire
   enforcement boundary. Actor id is **self-reported**; nothing stops any process that
@@ -269,9 +297,11 @@ that exact change is what silently breaks it.
 
 ## 9. Known Limitations (deliberate, not oversights)
 
-- `Ctrl-Q` (exit `open`) only reliably fires from the writable/claimed phase (§4.2, §5).
-  There is no fix for this without a different tmux-level primitive; don't attempt the
-  key-table workaround again (§3).
+- Mouse scrolling doesn't work while watching: tmux ignores mouse events from a
+  read-only client (§4). Fixing it means replacing `tmux attach` in `open` (see
+  `docs/plan-ux-audit.md`, phase 3).
+- tmux scrollback (`history-limit`) is the tmux default of 2000 lines, because
+  `-f /dev/null` skips user config. Not yet raised; see `docs/plan-ux-audit.md`.
 - No real authentication — actor ids are self-reported (§6). Fine for one trusted user
   on one machine; not fine as a multi-tenant boundary.
 - Session-level, not pane-level, ownership: one writer for the whole session, not
@@ -452,9 +482,9 @@ If you're starting from zero with only this file:
 4. Implement `watch` (`attach -r`) and `take` (claim → attach writable → release on
    exit, however it exits) — verify with the isolated-pty technique in §8 that
    read-only truly blocks typing before building anything on top of it.
-5. Install the two global keybindings from §5 exactly as written (`Ctrl-T` = bare
-   `detach-client`; `Ctrl-Q` = the quit-flag chain) — verify each empirically with an
-   isolated pty per §8 before assuming either works, especially under read-only.
+5. Install the global keybindings from §5 exactly as written (each a bare
+   `detach-client -E 'exit N'`) — verify each empirically with an isolated pty per §8
+   before assuming it works, especially under read-only.
 6. Implement `open`'s loop on top of steps 4–5.
 7. Add the status bar from §7, respecting the one-attribute-per-style-tag rule (§4.4),
    and verify the *rendered* output with a real attached client, not `display-message`.
@@ -605,12 +635,10 @@ already set their own PS1. The result is prepend-only: the human's existing prom
 appearance is unchanged, just prefixed with `[RC:0:3]` or similar.
 
 Q: Confirmed gotcha: `agent-tmux attach` vs `agent-tmux open`.
-A: `agent-tmux attach <session>` calls `tmux attach-session -r` (read-only). `Ctrl-T`
-and `Ctrl-Q` are **`open`-specific** — they only work when `agent-tmux open <session>`
-is used, because `open` installs the global key bindings and runs its toggle loop.
-Using `attach` by mistake leaves the user in a read-only session with no working exit
-key. Recovery: press `Ctrl-B d` (standard tmux detach, always honored in read-only),
-then re-run with `agent-tmux open <session>` instead. Do not document `attach` as a
+A: `agent-tmux attach <session>` calls `tmux attach-session -r` (read-only). The
+toggle and the menu are **`open`-specific**, since only `open` runs the loop that acts
+on them. Under `attach`/`watch`, any of `Ctrl-T`, `Ctrl-Q`, `Ctrl-]` (or `Ctrl-B d`)
+simply detaches, so the user is never trapped; re-run with `agent-tmux open <session>`. Do not document `attach` as a
 user-facing command in SKILL.md or any agent-facing guide.
 
 ## 14. Why There Is No `run` Command
