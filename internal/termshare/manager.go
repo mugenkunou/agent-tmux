@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/mugenkunou/agent-tmux/internal/recording"
 )
 
 // OwnerUnclaimed means no attached client currently holds input, so
@@ -38,9 +40,18 @@ var (
 // a comma inside a style tag is otherwise indistinguishable from the
 // true/false separators of the surrounding `#{?cond,true,false}`, which
 // silently drops the entire banner instead of raising a parse error.
-const statusRightFormat = " #{?#{==:#{@agent-tmux-owner},}" +
+const statusRightFormat = " " + recordingIndicator + "#{?#{==:#{@agent-tmux-owner},}" +
 	",#[bg=colour4]#[fg=black] OPEN - Ctrl-T takes control - Ctrl-] menu #[default]" +
 	",#[bg=colour2]#[fg=black] CONTROLLED BY #{@agent-tmux-owner} - Ctrl-T releases - Ctrl-] menu #[default]} "
+
+// recordingIndicator is the status bar's recorder state: "● REC" while the
+// recorder runs (tmux is piping the pane), "REC STOPPED" if it died, nothing
+// for a session without a recording (made by an older version). Same comma
+// rule as statusRightFormat. tmux notices a dead recorder on the pane's next
+// output, and the status line shows it on its next redraw.
+const recordingIndicator = "#{?#{@agent-tmux-recording}" +
+	",#{?pane_pipe,#[fg=colour1]\u25CF REC#[default] ,#[bg=colour1]#[fg=colour15] REC STOPPED #[default] }" +
+	",}"
 
 // Exit codes an attached tmux client ends with. Each key Open listens for is
 // bound to `detach-client -E 'exit N'`: tmux honors detach-client even for a
@@ -72,7 +83,15 @@ var keyBindings = []struct {
 // conditional's own separators and uses no style tags.
 const titleFormat = "#{?#{==:#{@agent-tmux-owner},}" +
 	",\U0001F440 agent-tmux: #S (watching)" +
-	",\u2328\uFE0F agent-tmux: #S (#{@agent-tmux-owner} controls)}"
+	",\u2328\uFE0F agent-tmux: #S (#{@agent-tmux-owner} controls)}" +
+	"#{?#{@agent-tmux-recording},#{?pane_pipe, \u25CF REC, REC STOPPED},}"
+
+// Recorder states of a Session.
+const (
+	RecorderRunning = "running"
+	RecorderStopped = "stopped" // has a recording, but its recorder is gone
+	RecorderNone    = "none"    // no recording (made by an older version)
+)
 
 type Session struct {
 	Name    string
@@ -80,12 +99,19 @@ type Session struct {
 	Clients int
 	Command string
 	Path    string
+	// Recording is the session's recording directory, "" for none.
+	Recording string
+	// Recorder is RecorderRunning, RecorderStopped or RecorderNone.
+	Recorder string
 }
 
 type Manager struct {
 	tmux       string
 	runtimeDir string
 	socketPath string
+	// executable is this program, which tmux runs as the recorder
+	// (`<executable> _record <dir>`); "" if it could not be found.
+	executable string
 }
 
 func NewManager() (*Manager, error) {
@@ -109,10 +135,12 @@ func NewManager() (*Manager, error) {
 		return nil, fmt.Errorf("secure runtime directory: %w", err)
 	}
 
+	executable, _ := os.Executable()
 	return &Manager{
 		tmux:       tmux,
 		runtimeDir: runtimeDir,
 		socketPath: filepath.Join(runtimeDir, "tmux.sock"),
+		executable: executable,
 	}, nil
 }
 
@@ -158,20 +186,64 @@ func (m *Manager) CreateWithHistory(ctx context.Context, name, shell string, col
 			return fmt.Errorf("session %q already exists", name)
 		}
 
+		if m.executable == "" {
+			return errors.New("cannot find this program's path to start the recorder")
+		}
+		root, err := recording.Root()
+		if err != nil {
+			return err
+		}
+		dir, err := recording.Create(root, name, time.Now())
+		if err != nil {
+			return err
+		}
+		logEvent(dir, "create", recording.Fields{"actor": actorID(), "tty": currentTTY()})
+
+		// Until the real shell runs, a failure removes the session and the
+		// recording both; after that the recording has output and stays.
+		shellStarted := false
+		abandon := func() {
+			_, _ = m.run(context.Background(), nil, "kill-session", "-t", exact(name))
+			if !shellStarted {
+				recording.WaitRecorder(dir, false, 2*time.Second)
+				_ = os.RemoveAll(dir)
+			}
+		}
+
 		// A pane takes its history-limit from the global option when it is
 		// created, so set it in the same tmux invocation, right before
 		// new-session (start-server makes this work on a cold server too).
 		// The create lock keeps concurrent creates from mixing values.
-		shellCommand := "exec " + shellQuote(shell) + " -l"
+		//
+		// The pane starts with a placeholder that prints nothing, so the
+		// recorder can be attached before the shell runs: otherwise login
+		// output would race pipe-pane and be lost. respawn-pane then swaps in
+		// the shell; the pipe survives it (and later restarts), the pane
+		// keeps its history-limit and start directory, and
+		// #{pane_start_command} becomes the shell, which restart reuses.
 		if _, err := m.run(ctx, nil,
 			"start-server", ";",
 			"set-option", "-g", "history-limit", strconv.Itoa(history), ";",
 			"new-session", "-d", "-s", name,
 			"-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows),
-			shellCommand,
+			"exec sleep 2147483647",
 		); err != nil {
+			_ = os.RemoveAll(dir)
 			return err
 		}
+		if err := m.startRecorder(ctx, name, dir); err != nil {
+			abandon()
+			return err
+		}
+		if _, err := m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-recording", dir); err != nil {
+			abandon()
+			return err
+		}
+		if _, err := m.run(ctx, nil, "respawn-pane", "-k", "-t", target(name), "exec "+shellQuote(shell)+" -l"); err != nil {
+			abandon()
+			return err
+		}
+		shellStarted = true
 
 		settings := [][2]string{
 			{"@agent-tmux-owner", OwnerUnclaimed},
@@ -184,12 +256,35 @@ func (m *Manager) CreateWithHistory(ctx context.Context, name, shell string, col
 		}
 		for _, setting := range settings {
 			if _, err := m.run(ctx, nil, "set-option", "-t", exact(name), setting[0], setting[1]); err != nil {
-				_, _ = m.run(context.Background(), nil, "kill-session", "-t", exact(name))
+				abandon()
 				return err
 			}
 		}
 		return nil
 	})
+}
+
+// startRecorder pipes the pane's output to `<this program> _record <dir>` and
+// waits until the recorder holds its lock, so a session never runs
+// unrecorded without anyone knowing.
+func (m *Manager) startRecorder(ctx context.Context, name, dir string) error {
+	// A second pipe-pane would turn piping off, so check first.
+	pipe, err := m.run(ctx, nil, "display-message", "-p", "-t", target(name), "#{pane_pipe}")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(pipe) != "0" {
+		return fmt.Errorf("session %q already pipes its output", name)
+	}
+	// tmux expands formats in the command, so a literal # is doubled.
+	command := strings.ReplaceAll(shellQuote(m.executable)+" _record "+shellQuote(dir), "#", "##")
+	if _, err := m.run(ctx, nil, "pipe-pane", "-o", "-t", target(name), command); err != nil {
+		return err
+	}
+	if !recording.WaitRecorder(dir, true, 5*time.Second) {
+		return fmt.Errorf("the recorder did not start (%s _record)", m.executable)
+	}
+	return nil
 }
 
 func (m *Manager) HasSession(ctx context.Context, name string) (bool, error) {
@@ -264,7 +359,7 @@ func (m *Manager) Send(ctx context.Context, name, text string, enter bool) error
 	if strings.IndexByte(text, 0) >= 0 {
 		return errors.New("text cannot contain a NUL byte")
 	}
-	return m.withAgentControl(ctx, name, func() error {
+	return m.withAgentControl(ctx, name, "send", func() error {
 		if _, err := m.run(ctx, nil, "send-keys", "-t", target(name), "-l", "--", text); err != nil {
 			return err
 		}
@@ -280,7 +375,7 @@ func (m *Manager) SendKeys(ctx context.Context, name string, keys []string) erro
 	if len(keys) == 0 {
 		return errors.New("at least one key is required")
 	}
-	return m.withAgentControl(ctx, name, func() error {
+	return m.withAgentControl(ctx, name, "key", func() error {
 		args := []string{"send-keys", "-t", target(name), "--"}
 		args = append(args, keys...)
 		_, err := m.run(ctx, nil, args...)
@@ -323,7 +418,7 @@ func (m *Manager) Watch(ctx context.Context, name string) error {
 		return err
 	}
 	defer preserveTerminalTitle(os.Stdout)()
-	_, err := m.attach(ctx, name, true, "")
+	_, err := m.attach(ctx, name, true, "", actorID())
 	return err
 }
 
@@ -379,7 +474,7 @@ func (m *Manager) Open(ctx context.Context, name string, hooks OpenHooks) error 
 		if hooks.Phase != nil {
 			hooks.Phase(owner)
 		}
-		code, attachErr := m.attach(ctx, name, !controlling, notice)
+		code, attachErr := m.attach(ctx, name, !controlling, notice, id)
 		if controlling {
 			_ = m.release(context.Background(), name)
 		}
@@ -435,7 +530,7 @@ func (m *Manager) Take(ctx context.Context, name string) error {
 	}
 	defer preserveTerminalTitle(os.Stdout)()
 	defer surviveHangup()()
-	_, attachErr := m.attach(ctx, name, false, "")
+	_, attachErr := m.attach(ctx, name, false, "", id)
 	releaseErr := m.release(context.Background(), name)
 	if attachErr != nil {
 		return attachErr
@@ -454,8 +549,15 @@ func (m *Manager) Yield(ctx context.Context, name string) error {
 		if err := m.requireSession(ctx, name); err != nil {
 			return err
 		}
+		owner, _, dir, err := m.readOwner(ctx, name)
+		if err != nil {
+			return err
+		}
 		if err := m.clearOwner(ctx, name); err != nil {
 			return err
+		}
+		if owner != OwnerUnclaimed {
+			logEvent(dir, "release", recording.Fields{"actor": owner, "by": "yield"})
 		}
 		return m.detachWriters(ctx, name)
 	})
@@ -488,19 +590,65 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 	if err := m.requireSession(ctx, name); err != nil {
 		return err
 	}
-	_, err := m.run(ctx, nil, "respawn-pane", "-k", "-t", target(name))
-	return err
+	if _, err := m.run(ctx, nil, "respawn-pane", "-k", "-t", target(name)); err != nil {
+		return err
+	}
+	logEvent(m.recordingDir(ctx, name), "respawn", recording.Fields{"actor": actorID()})
+	return nil
 }
 
 func (m *Manager) Kill(ctx context.Context, name string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
+	dir := m.recordingDir(ctx, name)
+	logEvent(dir, "kill", recording.Fields{"actor": actorID()})
 	_, err := m.run(ctx, nil, "kill-session", "-t", exact(name))
 	if removeErr := os.Remove(m.lockPath(name)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) && err == nil {
 		err = removeErr
 	}
+	if dir != "" && err == nil {
+		finishRecording(dir)
+	}
 	return err
+}
+
+// finishRecording waits for a killed session's recorder to see the end of its
+// input and write ended_at, so the recording is complete once kill returns. A
+// recorder that had already died leaves that to us.
+func finishRecording(dir string) {
+	if !recording.WaitRecorder(dir, false, 2*time.Second) {
+		warn(fmt.Errorf("the recorder of %s did not finish within 2s", dir))
+		return
+	}
+	if err := recording.Finalize(dir, time.Now()); err != nil {
+		warn(err)
+	}
+}
+
+// recordingDir is the session's recording directory, or "" if it has none
+// or does not exist.
+func (m *Manager) recordingDir(ctx context.Context, name string) string {
+	out, err := m.run(ctx, nil, "show-option", "-qv", "-t", exact(name), "@agent-tmux-recording")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+// logEvent appends to a session's events.jsonl. It is best effort: a failure
+// is a warning and never fails the command. dir "" (no recording) is a no-op.
+func logEvent(dir, event string, fields recording.Fields) {
+	if dir == "" {
+		return
+	}
+	if err := recording.LogEvent(dir, event, fields); err != nil {
+		warn(err)
+	}
+}
+
+func warn(err error) {
+	fmt.Fprintln(os.Stderr, "agent-tmux: warning:", err)
 }
 
 // claim records actorID (and its best-effort tty, for the audit trail) as
@@ -524,7 +672,7 @@ func (m *Manager) claim(ctx context.Context, name, actorID, tty string) error {
 		if err := m.requireSession(ctx, name); err != nil {
 			return err
 		}
-		owner, proc, err := m.readOwner(ctx, name)
+		owner, proc, dir, err := m.readOwner(ctx, name)
 		if err != nil {
 			return err
 		}
@@ -541,8 +689,11 @@ func (m *Manager) claim(ctx context.Context, name, actorID, tty string) error {
 		if _, err := m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-owner-proc", processIdentity(os.Getpid())); err != nil {
 			return err
 		}
-		_, err = m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-generation", strconv.Itoa(generation+1))
-		return err
+		if _, err := m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-generation", strconv.Itoa(generation+1)); err != nil {
+			return err
+		}
+		logEvent(dir, "claim", recording.Fields{"actor": actorID, "tty": tty})
+		return nil
 	})
 }
 
@@ -557,26 +708,34 @@ func (m *Manager) release(ctx context.Context, name string) error {
 		if err := m.requireSession(ctx, name); err != nil {
 			return err
 		}
-		_, proc, err := m.readOwner(ctx, name)
+		owner, proc, dir, err := m.readOwner(ctx, name)
 		if err != nil {
 			return err
 		}
 		if proc != processIdentity(os.Getpid()) {
 			return nil
 		}
-		return m.clearOwner(ctx, name)
+		if err := m.clearOwner(ctx, name); err != nil {
+			return err
+		}
+		logEvent(dir, "release", recording.Fields{"actor": owner})
+		return nil
 	})
 }
 
-// readOwner returns the session's owner and the process identity that
-// claimed it.
-func (m *Manager) readOwner(ctx context.Context, name string) (owner, proc string, err error) {
-	raw, err := m.run(ctx, nil, "display-message", "-p", "-t", target(name), "#{@agent-tmux-owner}\t#{@agent-tmux-owner-proc}")
+// readOwner returns the session's owner, the process identity that claimed
+// it, and the session's recording directory (for logging events).
+func (m *Manager) readOwner(ctx context.Context, name string) (owner, proc, dir string, err error) {
+	raw, err := m.run(ctx, nil, "display-message", "-p", "-t", target(name),
+		"#{@agent-tmux-owner}\t#{@agent-tmux-owner-proc}\t#{@agent-tmux-recording}")
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	owner, proc, _ = strings.Cut(strings.TrimRight(raw, "\n"), "\t")
-	return owner, proc, nil
+	fields := strings.SplitN(strings.TrimRight(raw, "\n"), "\t", 3)
+	for len(fields) < 3 {
+		fields = append(fields, "")
+	}
+	return fields[0], fields[1], fields[2], nil
 }
 
 // clearOwner does release's work; the caller holds the session lock.
@@ -599,7 +758,9 @@ func (m *Manager) readGeneration(ctx context.Context, name string) int {
 	return generation
 }
 
-func (m *Manager) withAgentControl(ctx context.Context, name string, action func() error) error {
+// withAgentControl runs a scripted write (send, key) when nobody controls the
+// session, and logs it as event, without what was sent.
+func (m *Manager) withAgentControl(ctx context.Context, name, event string, action func() error) error {
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
@@ -607,7 +768,7 @@ func (m *Manager) withAgentControl(ctx context.Context, name string, action func
 		if err := m.requireSession(ctx, name); err != nil {
 			return err
 		}
-		owner, proc, err := m.readOwner(ctx, name)
+		owner, proc, dir, err := m.readOwner(ctx, name)
 		if err != nil {
 			return err
 		}
@@ -617,12 +778,17 @@ func (m *Manager) withAgentControl(ctx context.Context, name string, action func
 			if err := m.clearOwner(ctx, name); err != nil {
 				return err
 			}
+			logEvent(dir, "release", recording.Fields{"actor": owner, "by": "stale"})
 			owner = OwnerUnclaimed
 		}
 		if owner != OwnerUnclaimed {
 			return fmt.Errorf("actor %q controls the terminal: %w", owner, ErrControlled)
 		}
-		return action()
+		if err := action(); err != nil {
+			return err
+		}
+		logEvent(dir, event, recording.Fields{"actor": actorID()})
+		return nil
 	})
 }
 
@@ -670,7 +836,7 @@ func (m *Manager) applyClientOptions(ctx context.Context, name string) error {
 		{"set-titles", "on"},
 		{"set-titles-string", titleFormat},
 		{"status-right", statusRightFormat},
-		{"status-right-length", "90"},
+		{"status-right-length", "110"},
 	} {
 		if _, err := m.run(ctx, nil, "set-option", "-t", exact(name), setting[0], setting[1]); err != nil {
 			return err
@@ -682,11 +848,20 @@ func (m *Manager) applyClientOptions(ctx context.Context, name string) error {
 // attach runs a tmux client on this terminal until it ends, and returns the
 // exit code naming the key that ended it (see exitToggle and friends), or
 // exitDetached for any other clean detach. A non-empty notice is shown on
-// the client's status line for a few seconds.
-func (m *Manager) attach(ctx context.Context, name string, readOnly bool, notice string) (int, error) {
+// the client's status line for a few seconds. actor is who attaches, for the
+// attach/detach events.
+func (m *Manager) attach(ctx context.Context, name string, readOnly bool, notice, actor string) (int, error) {
 	if err := m.applyClientOptions(ctx, name); err != nil {
 		return 0, err
 	}
+	mode := "control"
+	if readOnly {
+		mode = "watch"
+	}
+	dir := m.recordingDir(ctx, name)
+	fields := recording.Fields{"mode": mode, "actor": actor, "tty": currentTTY()}
+	logEvent(dir, "attach", fields)
+	defer logEvent(dir, "detach", fields)
 	args := m.baseArgs()
 	args = append(args, "attach-session")
 	if readOnly {
@@ -795,7 +970,7 @@ func target(name string) string {
 }
 
 func sessionFormat() string {
-	return "#{session_name}\t#{@agent-tmux-owner}\t#{session_attached}\t#{pane_current_command}\t#{pane_current_path}\t#{@agent-tmux-owner-proc}"
+	return "#{session_name}\t#{@agent-tmux-owner}\t#{session_attached}\t#{pane_current_command}\t#{pane_current_path}\t#{@agent-tmux-owner-proc}\t#{@agent-tmux-recording}\t#{pane_pipe}"
 }
 
 // processIdentity names a running process as "<pid>:<start time>", so a pid
@@ -876,8 +1051,8 @@ func parseSessions(output string) ([]Session, error) {
 	lines := strings.Split(output, "\n")
 	sessions := make([]Session, 0, len(lines))
 	for _, line := range lines {
-		fields := strings.SplitN(line, "\t", 6)
-		if len(fields) != 6 {
+		fields := strings.SplitN(line, "\t", 8)
+		if len(fields) != 8 {
 			return nil, fmt.Errorf("cannot parse tmux session response %q", line)
 		}
 		clients, err := strconv.Atoi(fields[2])
@@ -889,14 +1064,30 @@ func parseSessions(output string) ([]Session, error) {
 			owner = OwnerUnclaimed
 		}
 		sessions = append(sessions, Session{
-			Name:    fields[0],
-			Owner:   owner,
-			Clients: clients,
-			Command: fields[3],
-			Path:    fields[4],
+			Name:      fields[0],
+			Owner:     owner,
+			Clients:   clients,
+			Command:   fields[3],
+			Path:      fields[4],
+			Recording: fields[6],
+			Recorder:  recorderState(fields[6], fields[7]),
 		})
 	}
 	return sessions, nil
+}
+
+// recorderState tells a running recorder from a dead one. tmux's pane_pipe
+// only drops to 0 once the pane writes to a dead pipe, so the recorder's lock
+// is checked too: it is released the moment the recorder exits.
+func recorderState(dir, panePipe string) string {
+	switch {
+	case dir == "":
+		return RecorderNone
+	case panePipe == "1" && recording.RecorderRunning(dir):
+		return RecorderRunning
+	default:
+		return RecorderStopped
+	}
 }
 
 func shellQuote(value string) string {

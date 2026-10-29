@@ -1,6 +1,6 @@
 package main
 
-import agenttmux "agent-tmux"
+import agenttmux "github.com/mugenkunou/agent-tmux"
 
 // skillCommand prints the embedded SKILL.md. Like `completion`, the output
 // comes from the binary itself, so a copy written from it can never describe a

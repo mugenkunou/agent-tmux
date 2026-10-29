@@ -68,6 +68,9 @@ func TestRegistryIsWellFormed(t *testing.T) {
 			if p.variadic && i != len(c.args)-1 {
 				t.Errorf("%s: variadic positional %q must be last", c.name, p.name)
 			}
+			if p.optional && i+1 < len(c.args) && !c.args[i+1].optional {
+				t.Errorf("%s: optional positional %q comes before a required one", c.name, p.name)
+			}
 			if p.kind == argChoice && len(p.choices) == 0 {
 				t.Errorf("%s: choice positional %q has no choices", c.name, p.name)
 			}
@@ -133,6 +136,30 @@ func TestEveryCommandIsDispatchable(t *testing.T) {
 				t.Errorf("%s -h did not print its usage line %q; got %q", name, c.usageLine(), errOut.String())
 			}
 		}
+	}
+}
+
+// Optional and variadic positionals decide how many arguments are accepted
+// and how the usage line shows them.
+func TestOptionalPositionals(t *testing.T) {
+	c := newCommand("x", "test")
+	c.args = []positional{{name: "a"}, {name: "b", optional: true}}
+	for n, want := range map[int]bool{0: false, 1: true, 2: true, 3: false} {
+		if got := c.acceptsArgCount(n); got != want {
+			t.Errorf("required+optional, %d args: %v, want %v", n, got, want)
+		}
+	}
+	if got := c.usageLine(); got != "agent-tmux x <a> [<b>]" {
+		t.Errorf("usage %q", got)
+	}
+	c.args = []positional{{name: "s", variadic: true, optional: true}}
+	for n, want := range map[int]bool{0: true, 1: true, 5: true} {
+		if got := c.acceptsArgCount(n); got != want {
+			t.Errorf("optional variadic, %d args: %v, want %v", n, got, want)
+		}
+	}
+	if got := c.usageLine(); got != "agent-tmux x [<s>...]" {
+		t.Errorf("usage %q", got)
 	}
 }
 
@@ -253,13 +280,25 @@ func stripComments(script string) string {
 }
 
 func TestMain(m *testing.M) {
-	// Keep tests off the developer's real tmux server.
+	// Sessions created in-process have tmux run os.Executable(), which is
+	// this test binary, as the recorder: act as agent-tmux for it.
+	if len(os.Args) > 1 && os.Args[1] == "_record" {
+		os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
+	}
+	// Keep tests off the developer's real tmux server and recordings.
 	dir, err := os.MkdirTemp("", "at-")
 	if err != nil {
 		panic(err)
 	}
+	state, err := os.MkdirTemp("", "at-state-")
+	if err != nil {
+		panic(err)
+	}
 	os.Setenv("AGENT_TMUX_RUNTIME_DIR", dir)
+	os.Setenv("AGENT_TMUX_STATE_DIR", state)
+	os.Setenv("XDG_DATA_HOME", state) // rm's trash
 	code := m.Run()
 	os.RemoveAll(dir)
+	os.RemoveAll(state)
 	os.Exit(code)
 }

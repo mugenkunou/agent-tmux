@@ -13,10 +13,24 @@ import (
 	"testing"
 	"time"
 
-	"agent-tmux/internal/termshare"
+	"github.com/mugenkunou/agent-tmux/internal/recording"
+	"github.com/mugenkunou/agent-tmux/internal/termshare"
 )
 
 func noSessions() []termshare.Session { return nil }
+
+func noRecordings() []recording.Recording { return nil }
+
+func fixedRecordings(ids ...string) func() []recording.Recording {
+	return func() []recording.Recording {
+		var out []recording.Recording
+		for _, id := range ids {
+			name := id[:strings.Index(id, "-")]
+			out = append(out, recording.Recording{Meta: recording.Meta{ID: id, Name: name}})
+		}
+		return out
+	}
+}
 
 func fixedSessions(names ...string) func() []termshare.Session {
 	return func() []termshare.Session {
@@ -39,7 +53,7 @@ func values(cands []candidate) []string {
 
 func complVals(t *testing.T, sessions func() []termshare.Session, words ...string) []string {
 	t.Helper()
-	return values(complete(commands(), words, sessions))
+	return values(complete(commands(), words, sessions, noRecordings))
 }
 
 // --- Derived-from-registry invariants (no hardcoded surface) --------------
@@ -91,7 +105,7 @@ func TestSessionPositionalsOfferLiveSessionsAndOthersDoNot(t *testing.T) {
 			words = append(words, "")
 			got := complVals(t, sessions, words...)
 			switch p.kind {
-			case argSession:
+			case argSession, argRecording:
 				if !reflect.DeepEqual(got, []string{"alpha", "beta"}) {
 					t.Errorf("%s arg %d (%s): got %v, want sessions", c.name, i, p.name, got)
 				}
@@ -124,9 +138,11 @@ func TestSessionPositionalsOfferLiveSessionsAndOthersDoNot(t *testing.T) {
 func TestSessionsAreOnlyListedWhenNeeded(t *testing.T) {
 	called := false
 	probe := func() []termshare.Session { called = true; return nil }
-	complete(commands(), []string{""}, probe)
-	complete(commands(), []string{"send", "--"}, probe)
-	complete(commands(), []string{"create", ""}, probe)
+	recProbe := func() []recording.Recording { called = true; return nil }
+	complete(commands(), []string{""}, probe, recProbe)
+	complete(commands(), []string{"send", "--"}, probe, recProbe)
+	complete(commands(), []string{"create", ""}, probe, recProbe)
+	complete(commands(), []string{"grep", "--limit", ""}, probe, recProbe)
 	if called {
 		t.Error("session lister ran for a position that cannot take a session")
 	}
@@ -192,8 +208,35 @@ func TestWalkerCases(t *testing.T) {
 	}
 }
 
+// show, rm and grep --session name recordings: live sessions, recording ids
+// and the names of ended recordings. Commands taking only a live session
+// never offer recordings.
+func TestRecordingArgumentsOfferRecordings(t *testing.T) {
+	sessions := fixedSessions("web")
+	recs := fixedRecordings("web-2026-10-29-1402", "db-2026-10-28-0900", "db-2026-10-27-0900")
+	vals := func(words ...string) []string { return values(complete(commands(), words, sessions, recs)) }
+	all := []string{"db", "db-2026-10-27-0900", "db-2026-10-28-0900", "web", "web-2026-10-29-1402"}
+	for _, words := range [][]string{{"show", ""}, {"rm", ""}, {"rm", "x", ""}, {"rm", "--older-than", "7d", ""}, {"grep", "--session", ""}} {
+		if got := vals(words...); !reflect.DeepEqual(got, all) {
+			t.Errorf("%q = %v, want %v", words, got, all)
+		}
+	}
+	if got := vals("show", "db-2026-10-2"); !reflect.DeepEqual(got, []string{"db-2026-10-27-0900", "db-2026-10-28-0900"}) {
+		t.Errorf("id prefix = %v", got)
+	}
+	if got := vals("grep", "--session=d"); !reflect.DeepEqual(got, []string{"--session=db", "--session=db-2026-10-27-0900", "--session=db-2026-10-28-0900"}) {
+		t.Errorf("--session=<prefix> = %v", got)
+	}
+	if got := vals("grep", "--session", "web", ""); len(got) != 0 {
+		t.Errorf("grep text offered %v", got)
+	}
+	if got := vals("kill", ""); !reflect.DeepEqual(got, []string{"web"}) {
+		t.Errorf("kill offered %v, want only live sessions", got)
+	}
+}
+
 func TestEmptyWordsIsSafe(t *testing.T) {
-	if got := complete(commands(), nil, noSessions); len(got) == 0 {
+	if got := complete(commands(), nil, noSessions, noRecordings); len(got) == 0 {
 		t.Error("no words should behave like an empty first word and list commands")
 	}
 }
@@ -294,6 +337,15 @@ func TestBashScriptEndToEnd(t *testing.T) {
 		t.Fatalf("build: %v\n%s", err, output)
 	}
 
+	// One recording, so recording arguments have something to offer.
+	t.Setenv("AGENT_TMUX_STATE_DIR", t.TempDir())
+	root, _ := recording.Root()
+	recDir, err := recording.Create(root, "web", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recID := filepath.Base(recDir)
+
 	script, err := completionFS.ReadFile(completionScripts["bash"])
 	if err != nil {
 		t.Fatal(err)
@@ -313,6 +365,10 @@ func TestBashScriptEndToEnd(t *testing.T) {
 		{"agent-tmux wait --timeout=", "", ""},             // '=' folded; must not crash
 		{"agent-tmux wait --timeout ", "5s 30s 1m 5m", ""}, // hint after a value flag
 		{"agent-tmux completion ", "bash fish zsh", ""},
+		{"agent-tmux show w", recID + " web", ""},
+		{"agent-tmux grep --session ", recID + " web", ""},
+		{"agent-tmux rm --older-than ", "1d 7d 30d", ""},
+		{"agent-tmux l", "ls", ""},
 	}
 	for _, tc := range cases {
 		words := strings.Fields(tc.line)

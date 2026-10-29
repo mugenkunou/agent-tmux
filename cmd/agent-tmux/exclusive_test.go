@@ -1,19 +1,21 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 	"unsafe"
 
-	"agent-tmux/internal/termshare"
+	"github.com/mugenkunou/agent-tmux/internal/termshare"
 )
 
 // One writer at a time is the reason agent-tmux exists. This drives two
@@ -134,12 +136,63 @@ func TestOnlyOneTerminalControls(t *testing.T) {
 	second.write(t, "\x11")
 	first.wait(t)
 	second.wait(t)
+
+	// Every handoff above is in the recording's event log.
+	status, err := manager.Status(ctx, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logged := map[string]int{}
+	for _, e := range readEvents(t, status.Recording) {
+		key := fmt.Sprint(e["event"], " ", e["actor"])
+		if e["mode"] != nil {
+			key += " " + fmt.Sprint(e["mode"])
+		}
+		if e["by"] != nil {
+			key += " by " + fmt.Sprint(e["by"])
+		}
+		logged[key]++
+	}
+	for _, want := range []string{
+		"attach first-tab watch", "attach first-tab control", "detach first-tab control",
+		"attach second-tab watch", "attach second-tab control", "detach second-tab watch",
+		"claim first-tab", "release first-tab",
+		"claim second-tab", "release second-tab by yield",
+	} {
+		if logged[want] == 0 {
+			t.Errorf("event %q not logged; have %v", want, logged)
+		}
+	}
+	if logged["claim first-tab"] != 1 || logged["claim second-tab"] != 1 {
+		t.Errorf("a refused Ctrl-T was logged as a claim: %v", logged)
+	}
+}
+
+func readEvents(t *testing.T, dir string) []map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("bad event line %q: %v", line, err)
+		}
+		events = append(events, event)
+	}
+	return events
 }
 
 type openTab struct {
 	actor  string
 	master *os.File
 	cmd    *exec.Cmd
+
+	mu     sync.Mutex
+	output bytes.Buffer // filled once collect is called
+	drain  chan bool    // collect: keep the output instead of discarding it
 }
 
 func startOpen(t *testing.T, binary, runtimeDir, actor string, args ...string) *openTab {
@@ -147,7 +200,8 @@ func startOpen(t *testing.T, binary, runtimeDir, actor string, args ...string) *
 	master, slave := openTestPTY(t)
 	cmd := exec.Command(binary, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
-	env := []string{"TERM=xterm-256color", "AGENT_TMUX_RUNTIME_DIR=" + runtimeDir, "AGENT_TMUX_ACTOR_ID=" + actor}
+	env := []string{"TERM=xterm-256color", "AGENT_TMUX_RUNTIME_DIR=" + runtimeDir, "AGENT_TMUX_ACTOR_ID=" + actor,
+		"AGENT_TMUX_STATE_DIR=" + os.Getenv("AGENT_TMUX_STATE_DIR")}
 	for _, kv := range os.Environ() {
 		if !strings.HasPrefix(kv, "TMUX=") && !strings.HasPrefix(kv, "AGENT_TMUX_") && !strings.HasPrefix(kv, "TERM=") {
 			env = append(env, kv)
@@ -159,8 +213,26 @@ func startOpen(t *testing.T, binary, runtimeDir, actor string, args ...string) *
 		t.Fatal(err)
 	}
 	_ = slave.Close()
-	go func() { _, _ = io.Copy(io.Discard, master) }()
-	tab := &openTab{actor: actor, master: master, cmd: cmd}
+	tab := &openTab{actor: actor, master: master, cmd: cmd, drain: make(chan bool, 1)}
+	go func() {
+		keep := false
+		buf := make([]byte, 4096)
+		for {
+			select {
+			case keep = <-tab.drain:
+			default:
+			}
+			n, err := master.Read(buf)
+			if keep {
+				tab.mu.Lock()
+				tab.output.Write(buf[:n])
+				tab.mu.Unlock()
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
 	t.Cleanup(func() {
 		if cmd.ProcessState == nil {
 			_ = cmd.Process.Kill()
@@ -175,6 +247,36 @@ func (tab *openTab) write(t *testing.T, s string) {
 	t.Helper()
 	if _, err := tab.master.Write([]byte(s)); err != nil {
 		t.Fatalf("%s: write: %v", tab.actor, err)
+	}
+}
+
+// collect keeps the tab's output from now on, for waitFor.
+func (tab *openTab) collect() { tab.drain <- true }
+
+// reset forgets the output collected so far.
+func (tab *openTab) reset() {
+	tab.mu.Lock()
+	tab.output.Reset()
+	tab.mu.Unlock()
+}
+
+// waitFor waits until the tab's output contains want.
+func (tab *openTab) waitFor(t *testing.T, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		tab.mu.Lock()
+		found := bytes.Contains(tab.output.Bytes(), []byte(want))
+		tab.mu.Unlock()
+		if found {
+			return
+		}
+		if time.Now().After(deadline) {
+			tab.mu.Lock()
+			defer tab.mu.Unlock()
+			t.Fatalf("%s: output never contained %q:\n%q", tab.actor, want, tab.output.String())
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

@@ -123,6 +123,30 @@ Q: Does `respawn-pane -k` with no command restart the pane's original command?
 A: Yes — it reuses `#{pane_start_command}` (the `exec <shell> -l` from `create`), and
 the session, its name and attached clients are untouched. This is `restart`.
 
+Q: What happens to a `pipe-pane` child when the pane or session ends?
+A: tmux only closes the pipe. The child gets EOF on stdin, and no signal: it was seen
+to keep running after EOF until it exited by itself. Measured for `kill-session`,
+`kill-server`, the shell exiting, and turning piping off with a second `pipe-pane`.
+This is why the recorder can write `ended_at` itself (§16).
+
+Q: Does the pipe survive `respawn-pane -k`?
+A: Yes, both `respawn-pane -k '<cmd>'` and a later `respawn-pane -k` with no command:
+`#{pane_pipe}` stays 1 and the same child keeps receiving output. After
+`respawn-pane -k '<cmd>'`, `#{pane_start_command}` is the new command, so `restart`
+reuses it. The respawned pane keeps the history-limit it got at `new-session` and
+starts in `new-session`'s start directory (a restart goes back there even after a
+`cd`).
+
+Q: How soon does `#{pane_pipe}` notice a dead pipe child?
+A: Only when the pane next writes output. After the child was SIGKILLed, `pane_pipe`
+stayed 1 until the shell printed something, then dropped to 0. So agent-tmux also
+checks the recorder's `recorder.lock` (released the moment the process exits).
+
+Q: Is the `pipe-pane` command taken literally?
+A: No, tmux expands formats in it: `'a##b #{session_name}'` ran as `a#b <name>`. A
+literal `#` (possible in the binary's path or the recordings dir, e.g. through
+`XDG_STATE_HOME`) must be written `##`; `startRecorder` does that.
+
 Q: Does a scripted `send-keys` still work while the pane is in copy-mode?
 A: No — the keys go to copy-mode, and with a client attached `send-keys -l` was seen
 to **hang** for more than 5 s. Never put the shared pane into copy-mode for one
@@ -230,7 +254,7 @@ which briefly hold an ownership claim.
 - **`@agent-tmux-owner-proc`**: the claiming process as `<pid>:<start time>` (start
   time from `/proc/<pid>/stat`, so a reused pid doesn't pass for it). If that process
   is gone or a zombie, the claim is **stale**: `send`/`key` clear it under the session
-  lock instead of refusing, and `status`/`list` show the session as unclaimed. A claim
+  lock instead of refusing, and `status`/`ls` show the session as unclaimed. A claim
   with no recorded process (from an older version) is never treated as stale.
 - **Claims are exclusive.** `claim` refuses with `ErrControlled` while another *live*
   process holds the session (a stale or own claim is replaced). `release` only clears a
@@ -285,6 +309,11 @@ OPEN - Ctrl-T takes control
 CONTROLLED BY alice-9f2c - Ctrl-T releases
 ```
 
+In front of the banner, `recordingIndicator` shows `● REC` while `#{pane_pipe}` is 1
+and `REC STOPPED` when it is 0, only for sessions with `@agent-tmux-recording`; the tab
+title (§7b) ends with the same words. Verified on a pty client's raw output
+(`TestStatusBarShowsRecorderState`).
+
 Remember the comma rule from §4.4: every `#[...]` tag above carries exactly one
 attribute. Do not "simplify" this by combining `bg`/`fg` into one tag with a comma —
 that exact change is what silently breaks it.
@@ -324,9 +353,14 @@ that exact change is what silently breaks it.
   on one machine; not fine as a multi-tenant boundary.
 - Session-level, not pane-level, ownership: one writer for the whole session, not
   independent ownership per pane/window.
-- No persisted audit log file — only live tmux options (`@agent-tmux-owner`,
-  `@agent-tmux-owner-tty`) that vanish when the session ends. Would be a good next step
-  if audit history across sessions is ever needed.
+- The persisted record is the output transcript plus `events.jsonl` (§16): who
+  attached, claimed, released, sent or pressed keys, and when, never the text sent.
+  It is a log, not an audit trail: any process of the same Unix user can edit it, and
+  actor ids are self-reported.
+- Transcripts of full-screen programs (vim, htop, progress bars) are redraw noise in
+  `show`/`grep`, which print plain lines; the raw log with `scriptreplay` is faithful.
+  A recording holds whatever commands printed, secrets included if a command printed
+  them; files are `0600` and nothing syncs them.
 - No remote/relay attachment — this is strictly local, same-machine, same Unix user.
   Remote sharing (à la Upterm/tmate) was deliberately out of scope.
 - Persistence boundary: the session survives any client disconnecting, but not a local
@@ -553,7 +587,11 @@ autocomplete automatically. With the old shape the command list existed in three
 places (the switch, `printUsage`, the README) and flags in two (each handler and its
 usage string), so completion would have been a fourth copy guaranteed to drift. Now
 each command declares its `flag.FlagSet`, positionals (with a kind: free / session /
-choice) and summary once; dispatch, validation, help and completion all read that.
+recording / choice, and optional or variadic) and summary once; dispatch, validation,
+help and completion all read that. A flag whose value names a session or recording
+says so with `completeFlagAs` (`grep --session`). Completion gets two injected
+listers, live sessions and recordings, each called only when a position needs it, so
+the engine is tested without tmux.
 Don't "simplify" this back into a switch.
 
 Q: What stops the scripts or help from drifting anyway?
@@ -739,3 +777,59 @@ invocation as `new-session` (`start-server ; set-option -g history-limit N ;
 new-session …`), because a pane copies the global value when it is created. tmux
 spends memory only as lines arrive, about 2 KB per kept line.
 
+## 16. Recording
+
+Q: What is recorded, and how?
+A: Every session, always (no flag). `create` makes the pane with a placeholder that
+prints nothing (`exec sleep 2147483647`), checks `#{pane_pipe}` is 0 (a second
+`pipe-pane` would turn piping off), runs `pipe-pane -o '<this binary> _record <dir>'`,
+waits until the recorder holds `recorder.lock`, then `respawn-pane -k`s the real login
+shell. So login output is never lost to a race with `pipe-pane`, and a session never
+runs unrecorded without anyone knowing (create fails if the recorder won't start, and
+removes the session and the new recording dir). The session points at its recording
+through `@agent-tmux-recording` (absolute dir).
+
+Q: Where, and in what shape?
+A: `internal/recording`. Root: `$AGENT_TMUX_STATE_DIR` (tests), else
+`$XDG_STATE_HOME/agent-tmux`, else `~/.local/state/agent-tmux`. One dir per recording,
+`<name>-<local YYYY-MM-DD-HHMM>[-N]` (`os.Mkdir`, never overwrite); that basename is
+the recording id. Dirs 0700, files 0600. `meta.json` (written atomically),
+`stdout.NNNNNN.log` (raw bytes) with `stdout.NNNNNN.timing` (scriptreplay format),
+`events.jsonl` (one `write` per line with `O_APPEND`, so concurrent agent-tmux
+processes never interleave), `recorder.lock`.
+
+Q: Who writes what?
+A: While the recorder runs (holds the flock), it alone writes the segments and
+`meta.json`. It never holds more than one 32 KiB read block and writes each block
+before reading the next. On EOF it writes `ended_at`. Any agent-tmux process appends
+events (create, attach/detach with mode, claim, release, send, key, respawn, kill),
+best effort: a failure is a warning, never a failed command. `kill` logs, kills the
+session, then waits up to 2 s for the lock to be released, so `meta.json` is final
+when it returns; if the recorder was already dead, `kill` finalizes. `ls` and `rm`
+finalize stale recordings (no `ended_at`, no live session, lock free) with the mtime
+of the newest segment.
+
+Q: Rotation?
+A: At 64 MiB the segment ends after the block's last newline that fits, else its first
+newline, else exactly at the size, so a segment is at most one block over. The next
+segment opens on the next byte (never an empty trailing segment). Past 8 segments the
+oldest is unlinked in a goroutine and `first_segment`/`first_segment_at` move forward;
+each rotation logs `rotated`. `show` starts with "history starts at ..." then.
+
+Q: How is a dead recorder noticed?
+A: "running" means `pane_pipe` = 1 *and* the lock is held (§4: `pane_pipe` lags).
+`status`, `ls` and `doctor` show "stopped" otherwise and append `recorder-died` once
+(checked under a flock on `events.jsonl`). The status bar and title can only use
+`pane_pipe`, so they show `REC STOPPED` after the pane's next output and the next
+status redraw. A recorder is never restarted: its absence would hide a gap.
+
+Q: How do tests run the recorder, since `os.Executable()` is the test binary?
+A: Each test package's `TestMain` acts as `_record` when called with it (and sets
+`AGENT_TMUX_STATE_DIR` to a temp dir so nothing lands in the real state dir).
+
+Q: Reading recordings back?
+A: `show` streams the kept segments through `internal/transcript` (colors kept and
+paged through `less -R +G` on a terminal, plain when piped, `--raw` byte-exact); `grep`
+uses the same rendering, so its line numbers are lines of `show`'s plain output. `rm`
+moves recordings to the XDG trash (`internal/trash`) and refuses a live one, moving
+nothing in that call.

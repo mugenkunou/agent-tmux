@@ -22,6 +22,17 @@ Anyone attached can watch at any time, or temporarily claim the input lock to en
 
 ## Install
 
+From a release (Linux amd64 and arm64): download the `.tar.gz` for your CPU from the
+[releases page](https://github.com/mugenkunou/agent-tmux/releases), check it against
+`checksums.txt`, and put `agent-tmux` on your `PATH`. Or with Go:
+
+```bash
+go install github.com/mugenkunou/agent-tmux/cmd/agent-tmux@latest
+agent-tmux version
+```
+
+From a clone:
+
 ```bash
 make install
 agent-tmux doctor
@@ -43,8 +54,9 @@ make build
 ## Shell Completion
 
 `make install` also installs completions for bash, zsh and fish: commands, flags,
-flag-value hints, and **live session names** (with owner and running command shown
-where the shell supports descriptions). To set it up by hand instead:
+flag-value hints, **live session names** (with owner and running command shown
+where the shell supports descriptions), and, for `show`, `rm` and `grep --session`,
+recording ids and names too. To set it up by hand instead:
 
 ```bash
 eval "$(agent-tmux completion bash)"          # ~/.bashrc
@@ -102,7 +114,8 @@ Ctrl-T claims  ───────> Ctrl-T releases
 
 The mouse wheel doesn't scroll the session's output inside `open`: tmux ignores the mouse
 for a watching terminal (see [PROJECT.md §9](PROJECT.md#9-known-limitations-deliberate-not-oversights)).
-To read further back, run `agent-tmux screen --history <lines> work` from another terminal.
+To read further back, press `Ctrl-]` then `/` (the whole recording in `less`), or run
+`agent-tmux show work` from another terminal.
 
 ### When the session is stuck
 
@@ -111,7 +124,7 @@ frozen the program in the session is (an ssh connection hung by a network drop, 
 program ignoring Ctrl-C). It leaves tmux and shows a one-line menu:
 
 ```text
-agent-tmux work: [d]etach  [k]ill session  [r]estart shell  [c] send Ctrl-C  [any other key] back
+agent-tmux work: [d]etach  [k]ill session  [r]estart shell  [c] send Ctrl-C  [/] history  [any other key] back
 ```
 
 - `d` leaves `open`; the session keeps running.
@@ -120,6 +133,8 @@ agent-tmux work: [d]etach  [k]ill session  [r]estart shell  [c] send Ctrl-C  [an
   the session and its name (asks first). The same thing from another terminal:
   `agent-tmux restart work`.
 - `c` sends Ctrl-C to the session, then returns to it.
+- `/` shows the session's whole recording in `less` (`agent-tmux show`); quitting
+  `less` returns to the session.
 
 Any other key returns to the session. Control is always released before the menu
 shows, so the agent is never locked out while you decide.
@@ -165,6 +180,88 @@ Finish the session explicitly:
 agent-tmux kill work
 ```
 
+## Recording
+
+Every session is recorded, from its first byte (login banners included) to `kill`.
+There is no flag and no opt-out. What is recorded is the pane's **output**, exactly as
+the terminal received it. Input is never recorded on its own: what you type shows up
+only where the terminal echoed it, so passwords and TOTP codes (which don't echo) stay
+out. `send`, `key`, `claim`, `release`, attach and detach are logged as events, without
+the text sent.
+
+Recordings live in `~/.local/state/agent-tmux/` (`$XDG_STATE_HOME/agent-tmux` if set;
+`agent-tmux doctor` prints it), one directory per session, named
+`<name>-<YYYY-MM-DD-HHMM>` (`-2`, `-3` ... on a collision). That name is the recording's
+**id**. Directories are `0700`, files `0600`:
+
+```text
+web-2026-10-29-1402/
+  meta.json              name, id, host, started_at, ended_at, first_segment, first_segment_at
+  stdout.000001.log      raw output, byte-exact
+  stdout.000001.timing   "<delay> <bytes>" per write (scriptreplay format)
+  events.jsonl           create, attach, detach, claim, release, send, key, respawn, kill, rotated, recorder-died
+```
+
+A recording outlives its session: `kill` ends the shell and finishes `meta.json`, the
+files stay. Output goes to 64 MB segments; once more than 8 exist the oldest is deleted
+(about 512 MB per session at most). Each rotation is logged, and `show` then starts with
+`-- history starts at <time>; older output was rotated away --`.
+
+The status bar and tab title show `● REC` while the recorder runs and `REC STOPPED` if
+it died (`status`, `ls` and `doctor` say so too; the session keeps working, unrecorded).
+
+```bash
+agent-tmux ls                      # live sessions and recordings
+agent-tmux show work               # whole recording; less on a terminal, plain text when piped
+agent-tmux show --raw work > out   # the exact bytes, escape sequences and all
+agent-tmux grep 'connection refused'
+agent-tmux rm --older-than 30d     # move ended recordings to the trash
+```
+
+`show`, `rm` and `grep --session` take a live session name, a recording id, or a
+session name, which means its newest recording (for `rm`, every ended recording with
+that name). `rm` moves recordings to the XDG trash (`~/.local/share/Trash`) and refuses
+a live session's recording: kill the session first.
+
+Known limits: full-screen programs (vim, htop) and progress bars come out as redraw
+noise in `show` and `grep`, since those print plain text; the raw log with
+`scriptreplay` is faithful
+(`scriptreplay -t stdout.000001.timing stdout.000001.log` in the recording's directory). A recording holds whatever commands printed, secrets
+included if a command printed them. Files are `0600` and nothing syncs them anywhere.
+
+### JSON output
+
+`ls --json` (live sessions by name, then ended recordings, newest first; every field
+always present, zero values when it does not apply; `{"sessions":[]}` when empty):
+
+```json
+{"sessions":[
+  {"name":"web","id":"web-2026-10-29-1402","state":"live","recorder":"running",
+   "owner":"","clients":1,"command":"bash","path":"/home/u/src","host":"box",
+   "started_at":"2026-10-29T08:32:11Z","ended_at":"","history_starts_at":"2026-10-29T08:32:11Z",
+   "bytes":1048576}
+]}
+```
+
+`state` is `live` or `ended`. `recorder` is `running`, `stopped` (its recorder died),
+`none` (a session made by an older version, not recorded) or `""` for an ended
+recording. Times are RFC3339 UTC, `""` when unknown; `bytes` is the size of the kept
+segments.
+
+`grep --json` (exit 0 with or without matches; plain `grep` exits 1 with none):
+
+```json
+{"matches":[{"name":"web","id":"web-2026-10-29-1402","line":1234,"text":"..."}],"truncated":false}
+```
+
+`line` is the line number in the plain text that `show` prints for that recording.
+
+`version --json`:
+
+```json
+{"version":"v0.1.0","commit":"abc1234","date":"2026-10-29T10:00:00Z"}
+```
+
 ## Commands
 
 | Command | Purpose |
@@ -178,11 +275,17 @@ agent-tmux kill work
 | `watch` | Attach a read-only terminal |
 | `take` | Claim ownership and attach a writable terminal |
 | `yield` | Take control away from whoever holds it and put their terminal back to watching |
-| `status` / `list` | Inspect sessions and their current owner |
+| `ls` | List live sessions and recordings (`--json` for scripts) |
+| `status` | Inspect one session: owner, clients, command, path, recording, recorder |
+| `show` | Print a session's whole recording; pages with `less` on a terminal, plain text when piped, `--raw` for the exact bytes |
+| `grep` | Search recordings, newest first (`--json`, `--limit`, `--session`) |
+| `rm` | Move ended recordings to the trash (by id or name, or `--older-than 30d`) |
 | `restart` | Kill whatever runs in a session (e.g. a frozen ssh) and start a fresh shell in its place |
-| `kill` | Terminate a session |
+| `kill` | Terminate a session (its recording stays) |
+| `doctor` | Check tmux, show the socket and recordings paths and each session's recorder |
 | `completion` | Print the shell completion script for `bash`, `zsh` or `fish` |
 | `skill` | Print `SKILL.md`, matching this binary, for a skill manager to keep |
+| `version` | Print the version, commit and build date (`--json` for scripts) |
 
 ## Agent Integration
 
@@ -249,7 +352,7 @@ There is no built-in notion of "agent" versus "human" — only whether a session
 - Scripted writes attempted while someone else owns the session fail instead of being queued.
 - `Ctrl-T`, `Ctrl-Q` and `Ctrl-]` are bound server-wide to `detach-client -E 'exit N'`, a different N per key. `detach-client` is the one command tmux still honors for a read-only client, and the client's exit code tells `open` which key was pressed. `open` alternates read-only and writable `attach-session` calls around those detach points, claiming/releasing ownership on each transition.
 - Detaching from `take`, or either phase of `open`, clears the owner back to unclaimed. So does closing the tab: `open`/`take` survive the hangup long enough to release.
-- A claim records the claiming process (pid and start time). If that process is gone, the claim is stale: `send`/`key` clear it instead of refusing, and `status`/`list` show the session as unclaimed.
+- A claim records the claiming process (pid and start time). If that process is gone, the claim is stale: `send`/`key` clear it instead of refusing, and `status`/`ls` show the session as unclaimed.
 
 ### Actor identity
 
@@ -260,7 +363,7 @@ Each caller is identified by an `actor id`, not a role:
 - The claimant's controlling tty is recorded alongside the actor id (`@agent-tmux-owner-tty`, best-effort) as corroborating, kernel-verified evidence next to the self-reported id.
 - **This is accountability, not authentication.** `actor id` is self-reported; nothing stops any process reaching the socket from claiming any id, as noted below.
 
-The tmux socket and lock files live in a mode `0700` per-user runtime directory. This is cooperative isolation, not a sandbox: another process running as the same Unix user can still invoke tmux directly, or claim ownership under any actor id it likes. Terminal output is not logged by `agent-tmux`.
+The tmux socket and lock files live in a mode `0700` per-user runtime directory. This is cooperative isolation, not a sandbox: another process running as the same Unix user can still invoke tmux directly, or claim ownership under any actor id it likes. Terminal output is recorded (see [Recording](#recording)), readable only by your Unix user.
 
 ## Persistence Boundary
 
@@ -280,7 +383,7 @@ generated from it, so there is nothing else to update: add or edit a command's
 constructor and everything follows. Never hardcode command, flag or session names in
 the completion scripts. Tests enforce this (`registry_test.go`, `complete_test.go`):
 flags must have a description and name their value in backquotes, positionals declare
-what they hold (`argSession` completes live sessions), and the scripts must remain
+what they hold (`argSession` completes live sessions, `argRecording` recordings too), and the scripts must remain
 dumb relays to `agent-tmux __complete`.
 
 The integration tests launch real tmux sessions and verify persistent shell state and ownership-based write exclusion.

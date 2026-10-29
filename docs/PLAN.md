@@ -12,7 +12,26 @@ Done on `master`:
 - `open --native` removed (`64b66da`). One viewing mode: plain `tmux attach` for `open`, `watch` and `take`.
 - Exclusive control across `open`/`take` (`f5fd618`). `claim` refuses while another live process holds control, `release` only clears your own claim, `yield` detaches writers.
 
-Not started: everything below.
+Implemented, uncommitted (2026-10-29), all of §4 steps 1–7:
+- agent-tmux: recorder (`internal/recording`, hidden `_record`), `ls`/`show`/`grep`/`rm`/`version`,
+  `● REC` indicator, `[/] history` menu entry, GoReleaser + Actions workflow, module renamed to
+  `github.com/mugenkunou/agent-tmux` (needed for `go install`). Docs: README, SKILL.md, PROJECT.md §4/§16.
+- ws: old recorder and `~/Sessions` removed, `ws session` execs agent-tmux, completion delegated,
+  TUI sessions page on `ls --json`, version nudge, `ws skill install --providers` + `ws skill check`.
+
+Decisions made while implementing (the plan was silent):
+- "Recorder running" = `#{pane_pipe}` is 1 **and** `recorder.lock` is held; `pane_pipe` lags a dead
+  recorder until the pane prints again.
+- The recorder writes `ended_at` itself on EOF; `kill` waits up to 2 s for it. `ls` finalizes only
+  recordings whose recorder lock is free.
+- `rm <name>` refuses if `<name>` is live, even when ended recordings share the name; use the id.
+- ws has no `doctor` (grammar forbids umbrella verbs), so the nudge shows in `ws version` and the TUI.
+- Provider skills are copied by an explicit `ws skill install --providers`, not silently on every
+  run, so `ws skill check` can report drift. The workspace skills folder is `agent/skills`.
+
+Left to do:
+- Run `goreleaser check` once (not validated here), commit, then push tag `v0.1.0`.
+- Manual: delete the `"session": {...}` block from `~/Workspace/ws.json`; `ws config edit` rejects it.
 
 ## 2. Core promise and the incident behind it
 

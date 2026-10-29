@@ -22,7 +22,7 @@ This protects the terminal's live input channel at the moment something needs a 
    same tool.
 3. Choose a short task-specific session name such as `remote-debug` or
    `remote-debug-checkout`.
-4. Reuse an existing session when `agent-tmux status <session>` succeeds. Otherwise run `agent-tmux create <session>`.
+4. Reuse an existing session when `agent-tmux status <session>` succeeds (`agent-tmux ls` lists them all). Otherwise run `agent-tmux create <session>`.
 5. Tell the user the session name and this single command:
 
    ```bash
@@ -32,7 +32,7 @@ This protects the terminal's live input channel at the moment something needs a 
    (`agent-tmux create <session>` attaches the same way when the user runs it from
    their own terminal; only a scripted caller without a terminal stays detached.)
 
-   It attaches once, in the same terminal tab, starting unclaimed (watch-only). Pressing `Ctrl-T` claims control instantly for whoever is attached (it is refused while another terminal holds control); pressing `Ctrl-T` again releases it. `Ctrl-Q` exits `open` and returns their terminal to a normal prompt without ending the session. `Ctrl-]` opens a menu (detach, kill session, restart shell, send Ctrl-C) for when the session is stuck. No second tab and no separate `take`/`yield` commands are needed for routine handoffs.
+   It attaches once, in the same terminal tab, starting unclaimed (watch-only). Pressing `Ctrl-T` claims control instantly for whoever is attached (it is refused while another terminal holds control); pressing `Ctrl-T` again releases it. `Ctrl-Q` exits `open` and returns their terminal to a normal prompt without ending the session. `Ctrl-]` opens a menu (detach, kill session, restart shell, send Ctrl-C, history) for when the session is stuck. No second tab and no separate `take`/`yield` commands are needed for routine handoffs.
 
 ## Running Commands
 
@@ -82,6 +82,24 @@ agent-tmux screen --history 200 <session>
 ```
 
 Do not immediately retry a stalled command; duplicate input may reach the wrong prompt.
+
+## Reading Back History
+
+Every session is recorded from its first byte: everything the pane printed, kept after
+`clear`, after scrolling off the screen and after `kill`. Use it instead of a huge
+`screen --history` when you need older output:
+
+```bash
+agent-tmux show <session> | tail -n 200       # plain text when piped
+agent-tmux grep --session <session> 'error'   # case-insensitive, newest first
+agent-tmux grep --json 'connection refused'   # across all recordings
+```
+
+`show` and `grep --session` also take an ended session's name or a recording id from
+`agent-tmux ls`. Full-screen programs (vim, htop, progress bars) come out as redraw
+noise; `screen` is better for what is on screen right now. Input is never recorded on
+its own, only what the terminal printed, but a recording keeps whatever a command
+printed, so never ask the user to type a secret where it would echo.
 
 ## Interactive Commands
 

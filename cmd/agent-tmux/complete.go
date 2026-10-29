@@ -7,7 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"agent-tmux/internal/termshare"
+	"github.com/mugenkunou/agent-tmux/internal/recording"
+	"github.com/mugenkunou/agent-tmux/internal/termshare"
 )
 
 // candidate is one completion suggestion. The wire format printed by
@@ -30,14 +31,14 @@ func (c candidate) String() string {
 // complete computes candidates for the words typed after the program name;
 // the last word is the one being completed (possibly empty). It derives
 // everything from the registry: command names, each command's FlagSet and its
-// positional argument kinds. The only external input is the session lister,
-// injected so the engine is testable without tmux and only invoked when a
-// session name is actually needed.
+// positional argument kinds. The only external inputs are the session and
+// recording listers, injected so the engine is testable without tmux and only
+// invoked when a session or recording name is actually needed.
 //
 // Candidates are never escaped: session names are validated to
 // [A-Za-z0-9._-] (see termshare.validateSessionName) and flag/command names are
 // plain words, so none contains whitespace or shell metacharacters.
-func complete(cmds []*command, words []string, sessions func() []termshare.Session) []candidate {
+func complete(cmds []*command, words []string, sessions func() []termshare.Session, recordings func() []recording.Recording) []candidate {
 	if len(words) == 0 {
 		words = []string{""}
 	}
@@ -90,6 +91,9 @@ func complete(cmds []*command, words []string, sessions func() []termshare.Sessi
 	}
 
 	if pending != nil {
+		if kind, ok := cmd.flagArgs[pending.Name]; ok {
+			return named(kind, current, sessions, recordings)
+		}
 		return matching(cmd.hints[pending.Name], current)
 	}
 
@@ -102,8 +106,12 @@ func complete(cmds []*command, words []string, sessions func() []termshare.Sessi
 			if f == nil {
 				return nil
 			}
+			values := matching(cmd.hints[f.Name], current[eq+1:])
+			if kind, ok := cmd.flagArgs[f.Name]; ok {
+				values = named(kind, current[eq+1:], sessions, recordings)
+			}
 			var out []candidate
-			for _, c := range matching(cmd.hints[f.Name], current[eq+1:]) {
+			for _, c := range values {
 				out = append(out, candidate{value: current[:eq+1] + c.value})
 			}
 			return out
@@ -125,19 +133,47 @@ func complete(cmds []*command, words []string, sessions func() []termshare.Sessi
 	if !ok {
 		return nil
 	}
-	switch spec.kind {
-	case argSession:
-		var out []candidate
-		for _, s := range sessions() {
-			if strings.HasPrefix(s.Name, current) {
-				out = append(out, candidate{s.Name, sessionDescription(s)})
-			}
-		}
-		return out
-	case argChoice:
+	if spec.kind == argChoice {
 		return matching(spec.choices, current)
 	}
-	return nil
+	return named(spec.kind, current, sessions, recordings)
+}
+
+// named offers live sessions for argSession, and for argRecording also every
+// recording id and the session names of ended recordings.
+func named(kind argKind, current string, sessions func() []termshare.Session, recordings func() []recording.Recording) []candidate {
+	if kind != argSession && kind != argRecording {
+		return nil
+	}
+	var out []candidate
+	seen := map[string]bool{}
+	add := func(value, desc string) {
+		if !seen[value] && strings.HasPrefix(value, current) {
+			seen[value] = true
+			out = append(out, candidate{value, desc})
+		}
+	}
+	for _, s := range sessions() {
+		add(s.Name, sessionDescription(s))
+	}
+	if kind == argSession {
+		return out
+	}
+	recs := recordings()
+	for _, r := range recs {
+		add(r.Meta.ID, recordingDescription(r))
+	}
+	for _, r := range recs { // newest first, so the description is the newest one's
+		add(r.Meta.Name, "newest recording of "+r.Meta.Name)
+	}
+	return out
+}
+
+func recordingDescription(r recording.Recording) string {
+	if r.Meta.EndedAt == "" {
+		return "recording of " + r.Meta.Name + ", started " + localTime(r.Meta.StartedAt)
+	}
+	return "recording of " + r.Meta.Name + ", ended " + localTime(r.Meta.EndedAt)
 }
 
 // positionalAt returns the spec governing the i'th positional argument; a
@@ -192,6 +228,16 @@ func liveSessions(ctx context.Context) func() []termshare.Session {
 	}
 }
 
+// allRecordings lists recordings on demand; a failure yields none.
+func allRecordings() []recording.Recording {
+	root, err := recording.Root()
+	if err != nil {
+		return nil
+	}
+	recs, _ := recording.List(root)
+	return recs
+}
+
 // completeCommand is the hidden protocol endpoint the shell scripts call:
 //
 //	agent-tmux __complete <word>... <word-being-completed>
@@ -208,7 +254,7 @@ func completeCommand() *command {
 				code = 0
 			}
 		}()
-		for _, cand := range complete(commands(), inv.args, liveSessions(inv.ctx)) {
+		for _, cand := range complete(commands(), inv.args, liveSessions(inv.ctx), allRecordings) {
 			fmt.Fprintln(inv.stdout, cand)
 		}
 		return 0

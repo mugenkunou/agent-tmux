@@ -12,7 +12,7 @@ import (
 // returns true when `open` should end.
 func escapeMenu(inv *invocation, name string) bool {
 	for {
-		fmt.Fprintf(inv.stdout, "\r\nagent-tmux %s: [d]etach  [k]ill session  [r]estart shell  [c] send Ctrl-C  [any other key] back ", name)
+		fmt.Fprintf(inv.stdout, "\r\nagent-tmux %s: [d]etach  [k]ill session  [r]estart shell  [c] send Ctrl-C  [/] history  [any other key] back ", name)
 		key, err := readKey(os.Stdin)
 		fmt.Fprint(inv.stdout, "\r\n")
 		if err != nil {
@@ -37,6 +37,17 @@ func escapeMenu(inv *invocation, name string) bool {
 				continue
 			}
 			if err := inv.manager.Restart(inv.ctx, name); err != nil {
+				fail(inv.stderr, err)
+				continue
+			}
+			return false
+		case '/':
+			// The whole recording in less; re-attach when it is closed.
+			rec, err := resolveRecording(inv, name)
+			if err == nil {
+				err = showRecording(inv, rec, false)
+			}
+			if err != nil {
 				fail(inv.stderr, err)
 				continue
 			}

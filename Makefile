@@ -1,4 +1,4 @@
-.PHONY: help build install install-bin test clean hooks install-skill install-agents install-integration install-completions
+.PHONY: help build release-check install install-bin test clean hooks install-skill install-agents install-integration install-completions
 .DEFAULT_GOAL := help
 
 GOTMPDIR := $(CURDIR)/.tmp/go
@@ -15,9 +15,15 @@ help: ## List available targets (default)
 	@echo "Variables:"
 	@echo "  BINDIR=<dir>         where install puts the binary (default: GOBIN, else GOPATH/bin)"
 
+# Version info for `agent-tmux version`. Falls back to "dev" without git or tags.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT  ?= $(shell git rev-parse --short=7 HEAD 2>/dev/null)
+DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
+
 build: ## Build bin/agent-tmux
 	mkdir -p bin $(GOTMPDIR)
-	GOTMPDIR=$(GOTMPDIR) go build -o bin/agent-tmux ./cmd/agent-tmux
+	GOTMPDIR=$(GOTMPDIR) go build -ldflags "$(LDFLAGS)" -o bin/agent-tmux ./cmd/agent-tmux
 
 # The skill and agents are left out: the user's skill manager keeps them
 # (`agent-tmux skill`), or `make install-integration` links them on request.
@@ -81,8 +87,12 @@ test: ## Run the test suite
 	mkdir -p $(GOTMPDIR)
 	GOTMPDIR=$(GOTMPDIR) go test ./...
 
+release-check: ## Validate .goreleaser.yaml (needs goreleaser on PATH)
+	@command -v goreleaser >/dev/null || { echo "goreleaser is not installed; skipping" >&2; exit 0; }
+	goreleaser check
+
 clean: ## Remove build output
-	rm -rf bin .tmp
+	rm -rf bin dist .tmp
 
 hooks: ## Enable the gitleaks pre-commit secret scan for this clone
 	git config core.hooksPath .githooks

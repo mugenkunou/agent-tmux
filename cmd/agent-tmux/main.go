@@ -7,7 +7,7 @@ import (
 	"io"
 	"os"
 
-	"agent-tmux/internal/termshare"
+	"github.com/mugenkunou/agent-tmux/internal/termshare"
 )
 
 func main() {

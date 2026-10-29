@@ -1,0 +1,37 @@
+version: 2
+
+project_name: agent-tmux
+
+builds:
+  - id: agent-tmux
+    main: ./cmd/agent-tmux
+    binary: agent-tmux
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Tag}} -X main.commit={{.ShortCommit}} -X main.date={{.Date}}
+
+archives:
+  - id: agent-tmux
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - SKILL.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+
+release:
+  github:
+    owner: mugenkunou
+    name: agent-tmux

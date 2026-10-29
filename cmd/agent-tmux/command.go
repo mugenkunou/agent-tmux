@@ -8,7 +8,7 @@ import (
 	"io"
 	"strings"
 
-	"agent-tmux/internal/termshare"
+	"github.com/mugenkunou/agent-tmux/internal/termshare"
 )
 
 // The command registry (commands() in commands.go) is the single source of
@@ -30,15 +30,20 @@ const (
 	argSession
 	// argChoice is one of a fixed set, listed in positional.choices.
 	argChoice
+	// argRecording names a recording: a live session, a recording id, or
+	// the session name of a recording.
+	argRecording
 )
 
-// positional describes one positional argument. All positionals are
-// required; a variadic one must be last and accepts one or more values.
+// positional describes one positional argument. Positionals are required
+// unless optional; optional ones come after every required one. A variadic
+// one must be last and accepts one or more values (zero or more if optional).
 type positional struct {
 	name     string
 	kind     argKind
 	choices  []string
 	variadic bool
+	optional bool
 }
 
 // invocation is everything a command handler needs. args are the positional
@@ -71,6 +76,7 @@ type command struct {
 	fs       *flag.FlagSet
 	required []string            // flags that must be given
 	hints    map[string][]string // flag name -> suggested values (completion only)
+	flagArgs map[string]argKind  // flag name -> what its value names (completion only)
 	args     []positional
 
 	run func(inv *invocation) int
@@ -78,10 +84,11 @@ type command struct {
 
 func newCommand(name, summary string) *command {
 	return &command{
-		name:    name,
-		summary: summary,
-		fs:      flag.NewFlagSet(name, flag.ContinueOnError),
-		hints:   map[string][]string{},
+		name:     name,
+		summary:  summary,
+		fs:       flag.NewFlagSet(name, flag.ContinueOnError),
+		hints:    map[string][]string{},
+		flagArgs: map[string]argKind{},
 	}
 }
 
@@ -108,6 +115,13 @@ func (c *command) require(names ...string) {
 func (c *command) suggest(flagName string, values ...string) {
 	c.mustHaveFlag(flagName)
 	c.hints[flagName] = values
+}
+
+// completeFlagAs says a flag's value names a session or recording, so
+// completion offers live ones.
+func (c *command) completeFlagAs(flagName string, kind argKind) {
+	c.mustHaveFlag(flagName)
+	c.flagArgs[flagName] = kind
 }
 
 func (c *command) isNamed(name string) bool {
@@ -178,6 +192,9 @@ func (c *command) usageLine() string {
 		if p.variadic {
 			text += "..."
 		}
+		if p.optional {
+			text = "[" + text + "]"
+		}
 		parts = append(parts, text)
 	}
 	return strings.Join(parts, " ")
@@ -220,13 +237,19 @@ func (c *command) parse(args []string, stderr io.Writer) (rest []string, code in
 }
 
 func (c *command) acceptsArgCount(n int) bool {
-	if len(c.args) == 0 {
-		return n == 0
+	required := 0
+	for _, p := range c.args {
+		if !p.optional {
+			required++
+		}
 	}
-	if c.args[len(c.args)-1].variadic {
-		return n >= len(c.args)
+	if n < required {
+		return false
 	}
-	return n == len(c.args)
+	if len(c.args) > 0 && c.args[len(c.args)-1].variadic {
+		return true
+	}
+	return n <= len(c.args)
 }
 
 // printUsage renders the help text entirely from the registry.

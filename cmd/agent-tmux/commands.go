@@ -6,7 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"agent-tmux/internal/termshare"
+	"github.com/mugenkunou/agent-tmux/internal/recording"
+	"github.com/mugenkunou/agent-tmux/internal/termshare"
 )
 
 // commands builds the registry. It returns fresh instances on every call
@@ -19,7 +20,10 @@ import (
 func commands() []*command {
 	return []*command{
 		createCommand(),
-		listCommand(),
+		lsCommand(),
+		showCommand(),
+		grepCommand(),
+		rmCommand(),
 		statusCommand(),
 		screenCommand(),
 		sendCommand(),
@@ -34,6 +38,8 @@ func commands() []*command {
 		doctorCommand(),
 		completionCommand(),
 		skillCommand(),
+		versionCommand(),
+		recordCommand(),
 		completeCommand(),
 		helpCommand(),
 	}
@@ -74,10 +80,10 @@ func createCommand() *command {
 }
 
 // stdinIsTerminal reports whether the process was started with an
-// interactive stdin, i.e. whether attaching is meaningful at all.
+// interactive stdin, i.e. whether attaching is meaningful at all. /dev/null
+// is a character device too, so this asks for a terminal, not a device.
 func stdinIsTerminal() bool {
-	info, err := os.Stdin.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
+	return isTerminal(os.Stdin)
 }
 
 func ownerLabel(owner string) string {
@@ -87,28 +93,8 @@ func ownerLabel(owner string) string {
 	return owner
 }
 
-func listCommand() *command {
-	c := newCommand("list", "list sessions and their current owner")
-	c.run = func(inv *invocation) int {
-		sessions, err := inv.manager.List(inv.ctx)
-		if err != nil {
-			return fail(inv.stderr, err)
-		}
-		if len(sessions) == 0 {
-			fmt.Fprintln(inv.stdout, "no sessions")
-			return 0
-		}
-		fmt.Fprintln(inv.stdout, "SESSION\tOWNER\tCLIENTS\tCOMMAND\tPATH")
-		for _, session := range sessions {
-			fmt.Fprintf(inv.stdout, "%s\t%s\t%d\t%s\t%s\n", session.Name, ownerLabel(session.Owner), session.Clients, session.Command, session.Path)
-		}
-		return 0
-	}
-	return c
-}
-
 func statusCommand() *command {
-	c := newCommand("status", "show one session's owner, clients, command and path")
+	c := newCommand("status", "show one session's owner, clients, command, path, recording and recorder")
 	c.args = []positional{sessionArg}
 	c.run = func(inv *invocation) int {
 		session, err := inv.manager.Status(inv.ctx, inv.args[0])
@@ -116,6 +102,7 @@ func statusCommand() *command {
 			return fail(inv.stderr, err)
 		}
 		fmt.Fprintf(inv.stdout, "session: %s\nowner: %s\nclients: %d\ncommand: %s\npath: %s\n", session.Name, ownerLabel(session.Owner), session.Clients, session.Command, session.Path)
+		fmt.Fprintf(inv.stdout, "recording: %s\nrecorder: %s\n", session.Recording, recorderLabel(session))
 		return 0
 	}
 	return c
@@ -276,13 +263,29 @@ func killCommand() *command {
 }
 
 func doctorCommand() *command {
-	c := newCommand("doctor", "check that tmux is found and show the socket path")
+	c := newCommand("doctor", "check that tmux is found, show the socket path and recordings directory, and each session's recorder")
 	c.run = func(inv *invocation) int {
 		version, err := inv.manager.Version(inv.ctx)
 		if err != nil {
 			return fail(inv.stderr, err)
 		}
-		fmt.Fprintf(inv.stdout, "tmux: %s\nsocket: %s\n", version, inv.manager.SocketPath())
+		root, err := recording.Root()
+		if err != nil {
+			return fail(inv.stderr, err)
+		}
+		fmt.Fprintf(inv.stdout, "tmux: %s\nsocket: %s\nrecordings: %s\n", version, inv.manager.SocketPath(), root)
+		sessions, err := inv.manager.List(inv.ctx)
+		if err != nil {
+			return fail(inv.stderr, err)
+		}
+		for _, s := range sessions {
+			label := recorderLabel(s)
+			if s.Recorder == termshare.RecorderStopped {
+				fmt.Fprintf(inv.stdout, "warning: %s: recorder %s\n", s.Name, label)
+			} else {
+				fmt.Fprintf(inv.stdout, "session %s: recorder %s\n", s.Name, label)
+			}
+		}
 		return 0
 	}
 	return c
