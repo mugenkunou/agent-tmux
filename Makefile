@@ -3,9 +3,9 @@
 
 GOTMPDIR := $(CURDIR)/.tmp/go
 
-# Where install-bin puts the binary. Defaults to Go's own install dir (GOBIN, else
-# the first GOPATH entry's bin/). Override with e.g. `make install BINDIR=~/.local/bin`.
-BINDIR ?= $(or $(shell go env GOBIN),$(firstword $(subst :, ,$(shell go env GOPATH)))/bin)
+# Where install-bin puts the binary. Defaults to ~/.local/bin (no sudo, on PATH on
+# modern Linux). Override with e.g. `make install BINDIR=/usr/local/bin`.
+BINDIR ?= $(HOME)/.local/bin
 
 help: ## List available targets (default)
 	@echo "Usage: make <target>"
@@ -13,7 +13,7 @@ help: ## List available targets (default)
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo
 	@echo "Variables:"
-	@echo "  BINDIR=<dir>         where install puts the binary (default: GOBIN, else GOPATH/bin)"
+	@echo "  BINDIR=<dir>         where install puts the binary (default: ~/.local/bin)"
 
 # Version info for `agent-tmux version`. Falls back to "dev" without git or tags.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)

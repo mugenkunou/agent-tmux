@@ -37,8 +37,8 @@ make install
 agent-tmux doctor
 ```
 
-This builds the binary, copies it into Go's install dir (`GOBIN`, else `GOPATH/bin`;
-override with `make install BINDIR=~/.local/bin`), checks that `agent-tmux` on `PATH`
+This builds the binary, copies it into `~/.local/bin`
+(override with `make install BINDIR=/usr/local/bin`), checks that `agent-tmux` on `PATH`
 resolves to that copy, and installs shell completions. The skill and the `investigator`
 agent are left to you (see [Agent Integration](#agent-integration)). Re-run it after a `git pull` to pick up
 a new binary. Run `make` on its own to list every target.

@@ -550,8 +550,8 @@ implementation of the above and can be regenerated; this file is the part that c
 
 Q: Has this actually been built and installed for real (not just `make -n` dry-run),
 end to end?
-A: Yes — `make build` (produces `bin/agent-tmux`) and `make install` (`go install
-./cmd/agent-tmux` → `~/go/bin/agent-tmux`, already on `PATH`) were both run for real
+A: Yes — `make build` (produces `bin/agent-tmux`) and `make install` (builds, then
+copies the binary to `~/.local/bin/agent-tmux`, already on `PATH`) were both run for real
 on the dev machine; `agent-tmux doctor` and `--help` were used to confirm the
 installed binary resolves and finds tmux/the socket correctly. `make install-skill`
 and `make install-agents` were likewise run for real, not just dry-run-checked — the
