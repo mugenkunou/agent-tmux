@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -105,13 +108,13 @@ func TestVersionCheckStatuses(t *testing.T) {
 		code                          int
 		body                          string
 	}{
-		{"current", "v0.19.0", "current", "agent-tmux v0.19.0 (latest v0.19.0)", 200, `{"tag_name":"v0.19.0"}`},
+		{"current", "v0.19.0", "current", "agent-tmux v0.19.0  up to date", 200, `{"tag_name":"v0.19.0"}`},
 		{"ahead", "v0.20.0", "current", "", 200, `{"tag_name":"v0.19.0"}`},
-		{"outdated", "v0.19.0", "outdated", "agent-tmux v0.19.0: update available, latest is v0.20.0\nupgrade", 200, `{"tag_name":"v0.20.0"}`},
+		{"outdated", "v0.19.0", "outdated", "agent-tmux v0.19.0  \u2192 v0.20.0 available\n\nupgrade", 200, `{"tag_name":"v0.20.0"}`},
 		{"outdated numeric", "v0.9.0", "outdated", "", 200, `{"tag_name":"v0.10.0"}`},
-		{"dev", "dev", "dev", "agent-tmux dev: local build is a dev build; upstream release is v0.20.0", 200, `{"tag_name":"v0.20.0"}`},
+		{"dev", "dev", "dev", "agent-tmux dev  dev build \u00b7 upstream v0.20.0", 200, `{"tag_name":"v0.20.0"}`},
 		{"describe", "v0.19.0-3-gabc1234-dirty", "dev", "", 200, `{"tag_name":"v0.20.0"}`},
-		{"server error", "v0.19.0", "unknown", "agent-tmux v0.19.0: could not check latest release: GitHub returned 500", 500, `oops`},
+		{"server error", "v0.19.0", "unknown", "agent-tmux v0.19.0  check failed: GitHub returned 500", 500, `oops`},
 		{"bad json", "v0.19.0", "unknown", "", 200, `not json`},
 		{"bad tag", "v0.19.0", "unknown", "", 200, `{"tag_name":"nightly"}`},
 	}
@@ -125,8 +128,8 @@ func TestVersionCheckStatuses(t *testing.T) {
 			if (res.Status == "unknown") != (res.Error != "") {
 				t.Fatalf("error field wrong: %+v", res)
 			}
-			if !strings.HasPrefix(res.text(), c.text) {
-				t.Fatalf("text %q, want prefix %q", res.text(), c.text)
+			if !strings.HasPrefix(res.text(palette{}), c.text) {
+				t.Fatalf("text %q, want prefix %q", res.text(palette{}), c.text)
 			}
 		})
 	}
@@ -184,7 +187,7 @@ func TestVersionNoCacheHintsAndSpawns(t *testing.T) {
 	freshCacheDir(t)
 	setVersionVars(t, "v0.1.0", "abc1234", "2026-10-29")
 	out, _ := runVersion(t)
-	want := "agent-tmux v0.1.0 (abc1234, 2026-10-29)\nlatest unknown yet; run 'agent-tmux version --check' to look it up\n"
+	want := "agent-tmux v0.1.0 (abc1234, 2026-10-29)  latest unknown \u00b7 run 'agent-tmux version --check'\n"
 	if out != want {
 		t.Fatalf("got %q", out)
 	}
@@ -224,10 +227,10 @@ func TestVersionEnvDisablesSpawn(t *testing.T) {
 
 func TestVersionFromCache(t *testing.T) {
 	cases := []struct{ installed, tag, status, text string }{
-		{"v0.20.0", "v0.21.0", "outdated", "agent-tmux v0.20.0 (latest v0.21.0 \u2014 update available)\nupgrade"},
-		{"v0.21.0", "v0.21.0", "current", "agent-tmux v0.21.0 (up to date)\n"},
-		{"dev", "v0.21.0", "dev", "agent-tmux dev (local build is a dev build; upstream release is v0.21.0)\n"},
-		{"v0.20.0-3-gabc1234", "v0.21.0", "dev", "agent-tmux v0.20.0-3-gabc1234 (local build"},
+		{"v0.20.0", "v0.21.0", "outdated", "agent-tmux v0.20.0  \u2192 v0.21.0 available\n\nupgrade\n"},
+		{"v0.21.0", "v0.21.0", "current", "agent-tmux v0.21.0  up to date\n"},
+		{"dev", "v0.21.0", "dev", "agent-tmux dev  dev build \u00b7 upstream v0.21.0\n"},
+		{"v0.20.0-3-gabc1234", "v0.21.0", "dev", "agent-tmux v0.20.0-3-gabc1234  dev build"},
 	}
 	for _, c := range cases {
 		t.Run(c.installed, func(t *testing.T) {
@@ -236,7 +239,7 @@ func TestVersionFromCache(t *testing.T) {
 			now := time.Now()
 			saveCache(releaseCache{Tag: c.tag, CheckedAt: now, AttemptedAt: now})
 			out, _ := runVersion(t)
-			if !strings.HasPrefix(out, c.text) || strings.Contains(out, "unknown yet") {
+			if !strings.HasPrefix(out, c.text) || strings.Contains(out, "unknown") {
 				t.Fatalf("got %q", out)
 			}
 			if len(spawned) != 0 {
@@ -356,26 +359,102 @@ func TestRefreshFlagIsHidden(t *testing.T) {
 	}
 }
 
-func TestUpgradeHint(t *testing.T) {
-	oo, oa, oe := hintGOOS, hintGOARCH, hintExe
-	t.Cleanup(func() { hintGOOS, hintGOARCH, hintExe = oo, oa, oe })
-	hintExe = func() (string, error) { return "/home/u/.local/bin/agent-tmux", nil }
+const wantURL = `"https://github.com/mugenkunou/agent-tmux/releases/latest/download/agent-tmux-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"`
 
-	hintGOOS, hintGOARCH = "linux", "amd64"
-	want := "upgrade (linux amd64):\n" +
-		"  curl -fLO https://github.com/mugenkunou/agent-tmux/releases/latest/download/agent-tmux-linux-amd64\n" +
-		"  chmod +x agent-tmux-linux-amd64\n" +
-		"  mv agent-tmux-linux-amd64 /home/u/.local/bin/agent-tmux"
-	if got := upgradeHint(); got != want {
+const wantHint = "upgrade\n" +
+	"  $ curl -fL -o agent-tmux.download " + wantURL + "\n" +
+	"  $ chmod +x agent-tmux.download\n" +
+	"  $ mv agent-tmux.download /home/u/.local/bin/agent-tmux"
+
+func withHint(t *testing.T) {
+	t.Helper()
+	oe := hintExe
+	t.Cleanup(func() { hintExe = oe })
+	hintExe = func() (string, error) { return "/home/u/.local/bin/agent-tmux", nil }
+}
+
+func TestUpgradeHint(t *testing.T) {
+	withHint(t)
+	if got := upgradeHint(palette{}); got != wantHint {
 		t.Fatalf("got %q", got)
 	}
 	r := checkResult{Version: "v0.1.0", Latest: "v0.2.0", Status: "outdated"}
-	if !strings.HasSuffix(r.text(), "\n"+want) {
-		t.Fatalf("check text %q", r.text())
+	if got := r.text(palette{}); got != "agent-tmux v0.1.0  \u2192 v0.2.0 available\n\n"+wantHint {
+		t.Fatalf("check text %q", got)
 	}
+}
 
-	hintGOARCH = "arm64"
-	if got := upgradeHint(); got != "upgrade: download the binary for your system from https://github.com/mugenkunou/agent-tmux/releases/latest" {
-		t.Fatalf("got %q", got)
+func TestVersionTextPlainStates(t *testing.T) {
+	withHint(t)
+	p := palette{}
+	v := versionInfo{Version: "v0.22.0"}
+	cases := []struct{ got, want string }{
+		{textWithLatest(versionInfo{Version: "v0.22.0", Status: statusOutdated, Latest: "v0.24.0"}, &releaseCache{Tag: "v0.24.0"}, p),
+			"agent-tmux v0.22.0  \u2192 v0.24.0 available\n\n" + wantHint},
+		{textWithLatest(versionInfo{Version: "v0.22.0", Status: statusCurrent, Latest: "v0.22.0"}, &releaseCache{Tag: "v0.22.0"}, p),
+			"agent-tmux v0.22.0  up to date"},
+		{textWithLatest(versionInfo{Version: "dev", Commit: "abc1234", Date: "2026-10-29", Status: statusDev, Latest: "v0.24.0"}, &releaseCache{Tag: "v0.24.0"}, p),
+			"agent-tmux dev (abc1234, 2026-10-29)  dev build \u00b7 upstream v0.24.0"},
+		{textWithLatest(v, nil, p), "agent-tmux v0.22.0  latest unknown \u00b7 run 'agent-tmux version --check'"},
+		{checkResult{Version: "v0.22.0", Status: statusUnknown, Error: "boom"}.text(p), "agent-tmux v0.22.0  check failed: boom"},
+	}
+	for i, c := range cases {
+		if c.got != c.want {
+			t.Errorf("case %d: got %q want %q", i, c.got, c.want)
+		}
+	}
+}
+
+func TestVersionTextColour(t *testing.T) {
+	withHint(t)
+	p := palette{on: true}
+	got := textWithLatest(versionInfo{Version: "v0.22.0", Commit: "abc1234", Status: statusOutdated, Latest: "v0.24.0"}, &releaseCache{Tag: "v0.24.0"}, p)
+	for _, w := range []string{
+		"agent-tmux v0.22.0\x1b[2m (abc1234)\x1b[0m  \x1b[33m\u2192 v0.24.0 available\x1b[0m\n\n",
+		"\x1b[33mupgrade\x1b[0m\n",
+		"  \x1b[2m$ chmod +x agent-tmux.download\x1b[0m\n",
+	} {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q in %q", w, got)
+		}
+	}
+	if g := textWithLatest(versionInfo{Version: "v1.0.0", Status: statusCurrent}, &releaseCache{Tag: "v1.0.0"}, p); g != "agent-tmux v1.0.0  \x1b[2mup to date\x1b[0m" {
+		t.Errorf("got %q", g)
+	}
+}
+
+func TestColourNeverWhenPiped(t *testing.T) {
+	freshCacheDir(t)
+	setVersionVars(t, "v0.1.0", "", "")
+	now := time.Now()
+	saveCache(releaseCache{Tag: "v0.2.0", CheckedAt: now, AttemptedAt: now})
+	out, _ := runVersion(t) // stdout is a buffer, real colorFor
+	if strings.Contains(out, "\x1b") {
+		t.Fatalf("escape codes in piped output: %q", out)
+	}
+	// An *os.File that is a regular file is not a terminal either.
+	f, err := os.Create(filepath.Join(t.TempDir(), "out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm")
+	if colorFor(f) || colorFor(&bytes.Buffer{}) {
+		t.Fatal("colour on for a non-terminal")
+	}
+}
+
+func TestColourSeamUsedByCommand(t *testing.T) {
+	freshCacheDir(t)
+	setVersionVars(t, "v0.1.0", "", "")
+	now := time.Now()
+	saveCache(releaseCache{Tag: "v0.1.0", CheckedAt: now, AttemptedAt: now})
+	old := colorFor
+	colorFor = func(io.Writer) bool { return true }
+	t.Cleanup(func() { colorFor = old })
+	out, _ := runVersion(t)
+	if out != "agent-tmux v0.1.0  \x1b[2mup to date\x1b[0m\n" {
+		t.Fatalf("got %q", out)
 	}
 }

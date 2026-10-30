@@ -22,19 +22,20 @@ Anyone attached can watch at any time, or temporarily claim the input lock to en
 
 ## Install
 
-From a release (Linux amd64; for arm64 use `agent-tmux-linux-arm64` instead):
+From a release (Linux amd64 and arm64; the shell picks the right asset):
 
 ```bash
 mkdir -p ~/.local/bin
-curl -fLO https://github.com/mugenkunou/agent-tmux/releases/latest/download/agent-tmux-linux-amd64
-chmod +x agent-tmux-linux-amd64
-mv agent-tmux-linux-amd64 ~/.local/bin/agent-tmux
+curl -fL -o agent-tmux.download "https://github.com/mugenkunou/agent-tmux/releases/latest/download/agent-tmux-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+chmod +x agent-tmux.download
+mv agent-tmux.download ~/.local/bin/agent-tmux
 agent-tmux version
 ```
 
-The release assets are plain binaries, not archives. To verify one, download `checksums.txt`
-from the same release into the same folder and run
-`sha256sum -c --ignore-missing checksums.txt` before the `chmod`/`mv`.
+The release assets are `agent-tmux-linux-amd64` and `agent-tmux-linux-arm64`: plain binaries,
+not archives. There is no prebuilt macOS binary; build from a clone with `make install`. To
+verify an asset, download it under its own name plus `checksums.txt` from the same release and
+run `sha256sum -c --ignore-missing checksums.txt` before the `chmod`/`mv`.
 
 From a clone:
 
@@ -265,15 +266,26 @@ Plain `version` also shows the latest upstream release, read from a local cache 
 waits on the network:
 
 ```text
-agent-tmux v0.20.0 (latest v0.21.0 — update available)
-agent-tmux v0.21.0 (up to date)
-agent-tmux dev (local build is a dev build; upstream release is v0.21.0)
-agent-tmux v0.20.0
-latest unknown yet; run 'agent-tmux version --check' to look it up
+agent-tmux v0.20.0  → v0.21.0 available
+
+upgrade
+  $ curl -fL -o agent-tmux.download "https://github.com/mugenkunou/agent-tmux/releases/latest/download/agent-tmux-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+  $ chmod +x agent-tmux.download
+  $ mv agent-tmux.download /home/you/.local/bin/agent-tmux
 ```
 
-The text goes after the commit and date when the build has them. An outdated build adds a
-few more lines with the exact commands to upgrade (Linux amd64; other systems get a link to the releases page). Anything that is not a clean `vX.Y.Z` release (`dev`, a
+```text
+agent-tmux v0.21.0  up to date
+agent-tmux dev  dev build · upstream v0.21.0
+agent-tmux v0.20.0  latest unknown · run 'agent-tmux version --check'
+```
+
+The status is one short line after the version (and after the commit and date when the build
+has them). On a terminal, the arrow line is yellow and everything else in the status and the
+upgrade block is grey; piped output, `NO_COLOR` and `TERM=dumb` stay plain, as above. The
+upgrade block has the exact commands (the shell picks the asset for your OS and arch; the
+`mv` target is the running binary; there is no prebuilt macOS binary, so build from a clone
+with `make install` there). Anything that is not a clean `vX.Y.Z` release (`dev`, a
 `git describe` string, a pre-release) is a dev build and is never reported as outdated.
 
 The cache is `${XDG_CACHE_HOME:-~/.cache}/agent-tmux/release.json` and is fresh for 24 hours.
@@ -296,10 +308,10 @@ cache, and stores what it fetched. It exits 0 for every status; a failed lookup 
 `unknown`.
 
 ```text
-agent-tmux v0.19.0 (latest v0.19.0)
-agent-tmux v0.19.0: update available, latest is v0.20.0
-agent-tmux dev: local build is a dev build; upstream release is v0.20.0
-agent-tmux v0.19.0: could not check latest release: <error>
+agent-tmux v0.19.0  up to date
+agent-tmux v0.19.0  → v0.20.0 available      (then the upgrade block)
+agent-tmux dev  dev build · upstream v0.20.0
+agent-tmux v0.19.0  check failed: <error>
 ```
 
 `version --check --json` prints one object: `version` (installed), `latest` (`""` when

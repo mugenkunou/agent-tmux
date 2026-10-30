@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -73,34 +72,76 @@ func finishVersion(info versionInfo) versionInfo {
 }
 
 func (v versionInfo) String() string {
-	s := "agent-tmux " + v.Version
-	switch {
-	case v.Commit != "" && v.Date != "":
-		s += fmt.Sprintf(" (%s, %s)", v.Commit, v.Date)
-	case v.Commit != "":
-		s += fmt.Sprintf(" (%s)", v.Commit)
-	case v.Date != "":
-		s += fmt.Sprintf(" (%s)", v.Date)
-	}
-	return s
+	return "agent-tmux " + v.Version + v.detail()
 }
 
-// textWithLatest is the plain `version` output: the build line, then what the
-// local cache says about upstream. It never touches the network.
-func textWithLatest(info versionInfo, c *releaseCache) string {
-	s := info.String()
+// detail is the " (commit, date)" part of the build line, or "".
+func (v versionInfo) detail() string {
+	switch {
+	case v.Commit != "" && v.Date != "":
+		return fmt.Sprintf(" (%s, %s)", v.Commit, v.Date)
+	case v.Commit != "":
+		return fmt.Sprintf(" (%s)", v.Commit)
+	case v.Date != "":
+		return fmt.Sprintf(" (%s)", v.Date)
+	}
+	return ""
+}
+
+// palette colours human text. The zero value is plain.
+type palette struct{ on bool }
+
+const (
+	ansiFaint  = "\x1b[2m"
+	ansiYellow = "\x1b[33m"
+	ansiReset  = "\x1b[0m"
+)
+
+func (p palette) wrap(code, s string) string {
+	if !p.on || s == "" {
+		return s
+	}
+	return code + s + ansiReset
+}
+func (p palette) grey(s string) string   { return p.wrap(ansiFaint, s) }
+func (p palette) yellow(s string) string { return p.wrap(ansiYellow, s) }
+
+// colorFor is a seam: colours only on a terminal, with NO_COLOR empty and
+// TERM not "dumb".
+var colorFor = func(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok || os.Getenv("NO_COLOR") != "" || os.Getenv("TERM") == "dumb" {
+		return false
+	}
+	st, err := f.Stat()
+	return err == nil && st.Mode()&os.ModeCharDevice != 0
+}
+
+// mainLine is "agent-tmux <version> [(commit, date)]  <status>"; the status
+// is already coloured by the caller.
+func (v versionInfo) mainLine(p palette, status string) string {
+	return "agent-tmux " + v.Version + p.grey(v.detail()) + "  " + status
+}
+
+// textWithLatest is the plain `version` output: one line, plus the upgrade
+// block when outdated. It never touches the network.
+func textWithLatest(info versionInfo, c *releaseCache, p palette) string {
 	if c == nil || c.Tag == "" {
-		return s + "\nlatest unknown yet; run 'agent-tmux version --check' to look it up"
+		return info.mainLine(p, p.grey("latest unknown \u00b7 run 'agent-tmux version --check'"))
 	}
-	switch info.Status {
+	return renderStatus(info, info.Status, info.Latest, p)
+}
+
+func renderStatus(info versionInfo, status, latest string, p palette) string {
+	switch status {
 	case statusCurrent:
-		s += " (up to date)"
+		return info.mainLine(p, p.grey("up to date"))
 	case statusOutdated:
-		s += fmt.Sprintf(" (latest %s \u2014 update available)\n%s", info.Latest, upgradeHint())
+		return info.mainLine(p, p.yellow("\u2192 "+latest+" available")) + "\n\n" + upgradeHint(p)
 	case statusDev:
-		s += fmt.Sprintf(" (local build is a dev build; upstream release is %s)", info.Latest)
+		return info.mainLine(p, p.grey("dev build \u00b7 upstream "+latest))
 	}
-	return s
+	return info.mainLine(p, "")
 }
 
 func versionCommand() *command {
@@ -128,7 +169,7 @@ func versionCommand() *command {
 				fmt.Fprintln(inv.stdout, string(out))
 				return 0
 			}
-			fmt.Fprintln(inv.stdout, res.text())
+			fmt.Fprintln(inv.stdout, res.text(palette{colorFor(inv.stdout)}))
 			return 0
 		}
 		cache := loadCache()
@@ -147,7 +188,7 @@ func versionCommand() *command {
 			fmt.Fprintln(inv.stdout, string(out))
 			return 0
 		}
-		fmt.Fprintln(inv.stdout, textWithLatest(info, cache))
+		fmt.Fprintln(inv.stdout, textWithLatest(info, cache, palette{colorFor(inv.stdout)}))
 		return 0
 	}
 	return c
@@ -279,48 +320,42 @@ func checkRelease(ctx context.Context, installed string) checkResult {
 	return res
 }
 
-func (r checkResult) text() string {
-	switch r.Status {
-	case statusCurrent:
-		return fmt.Sprintf("agent-tmux %s (latest %s)", r.Version, r.Latest)
-	case statusOutdated:
-		return fmt.Sprintf("agent-tmux %s: update available, latest is %s\n%s", r.Version, r.Latest, upgradeHint())
-	case statusDev:
-		return fmt.Sprintf("agent-tmux %s: local build is a dev build; upstream release is %s", r.Version, r.Latest)
+func (r checkResult) text(p palette) string {
+	info := versionInfo{Version: r.Version}
+	if r.Status == statusUnknown || r.Status == "" {
+		return info.mainLine(p, p.grey("check failed: "+strings.TrimSpace(r.Error)))
 	}
-	return fmt.Sprintf("agent-tmux %s: could not check latest release: %s", r.Version, strings.TrimSpace(r.Error))
+	return renderStatus(info, r.Status, r.Latest, p)
 }
 
 const releasesPage = "https://github.com/mugenkunou/agent-tmux/releases/latest"
 
-// Seams for tests: the platform and the running binary's path.
-var (
-	hintGOOS   = runtime.GOOS
-	hintGOARCH = runtime.GOARCH
-	hintExe    = func() (string, error) {
-		p, err := os.Executable()
-		if err != nil {
-			return "", err
-		}
-		if r, err := filepath.EvalSymlinks(p); err == nil {
-			p = r
-		}
-		return p, nil
+// Seam for tests: the running binary's path.
+var hintExe = func() (string, error) {
+	p, err := os.Executable()
+	if err != nil {
+		return "", err
 	}
-)
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		p = r
+	}
+	return p, nil
+}
+
+// upgradeURL picks the asset for the machine with shell substitution, so one
+// block works on every OS and arch the releases cover.
+const upgradeURL = `"` + releasesPage + `/download/agent-tmux-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"`
 
 // upgradeHint says how to replace this binary with the latest release.
-func upgradeHint() string {
-	if hintGOOS != "linux" || hintGOARCH != "amd64" {
-		return "upgrade: download the binary for your system from " + releasesPage
-	}
+func upgradeHint(p palette) string {
 	exe, err := hintExe()
 	if err != nil || exe == "" {
 		exe = "<path of agent-tmux>"
 	}
-	const name = "agent-tmux-linux-amd64"
-	return "upgrade (linux amd64):\n" +
-		"  curl -fLO " + releasesPage + "/download/" + name + "\n" +
-		"  chmod +x " + name + "\n" +
-		"  mv " + name + " " + exe
+	const tmp = "agent-tmux.download"
+	cmd := func(c string) string { return "  " + p.grey("$ "+c) }
+	return p.yellow("upgrade") + "\n" +
+		cmd("curl -fL -o "+tmp+" "+upgradeURL) + "\n" +
+		cmd("chmod +x "+tmp) + "\n" +
+		cmd("mv "+tmp+" "+exe)
 }
