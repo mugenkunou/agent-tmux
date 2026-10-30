@@ -6,6 +6,7 @@ import (
 	"flag"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"regexp"
 	"sort"
@@ -296,7 +297,10 @@ func TestMain(m *testing.M) {
 	}
 	os.Setenv("AGENT_TMUX_RUNTIME_DIR", dir)
 	os.Setenv("AGENT_TMUX_STATE_DIR", state)
-	os.Setenv("XDG_DATA_HOME", state) // rm's trash
+	os.Setenv("XDG_DATA_HOME", state)  // rm's trash
+	os.Setenv("XDG_CACHE_HOME", state) // version's release cache
+	os.Unsetenv(noVersionCheckEv)
+	startCmd = func(c *exec.Cmd) error { spawned = append(spawned, c); return nil }
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.RemoveAll(state)

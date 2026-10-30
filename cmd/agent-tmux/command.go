@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/mugenkunou/agent-tmux/internal/termshare"
@@ -78,6 +79,12 @@ type command struct {
 	hints    map[string][]string // flag name -> suggested values (completion only)
 	flagArgs map[string]argKind  // flag name -> what its value names (completion only)
 	args     []positional
+
+	// internalFlags are boolean flags that exist only for agent-tmux's own
+	// re-invocations. They are stripped before flag parsing, so they stay out
+	// of usage, completion and the README; internalGiven records which ran.
+	internalFlags []string
+	internalGiven map[string]bool
 
 	run func(inv *invocation) int
 }
@@ -206,6 +213,18 @@ func (c *command) usageLine() string {
 func (c *command) parse(args []string, stderr io.Writer) (rest []string, code int, done bool) {
 	if c.raw {
 		return args, 0, false
+	}
+	if len(c.internalFlags) > 0 {
+		c.internalGiven = map[string]bool{}
+		kept := make([]string, 0, len(args))
+		for _, a := range args {
+			if slices.ContainsFunc(c.internalFlags, func(n string) bool { return a == "--"+n || a == "-"+n }) {
+				c.internalGiven[strings.TrimLeft(a, "-")] = true
+				continue
+			}
+			kept = append(kept, a)
+		}
+		args = kept
 	}
 	c.fs.SetOutput(stderr)
 	c.fs.Usage = func() {

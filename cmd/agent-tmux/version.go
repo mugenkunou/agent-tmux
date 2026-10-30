@@ -27,6 +27,10 @@ type versionInfo struct {
 	Version string `json:"version"`
 	Commit  string `json:"commit"`
 	Date    string `json:"date"`
+	// Latest and Status come from the local release cache only; both are
+	// omitted when there is no cache.
+	Latest string `json:"latest,omitempty"`
+	Status string `json:"status,omitempty"`
 }
 
 // resolveVersion prefers the ldflags values, then the module and VCS data
@@ -78,15 +82,41 @@ func (v versionInfo) String() string {
 	return s
 }
 
+// textWithLatest is the plain `version` output: the build line, then what the
+// local cache says about upstream. It never touches the network.
+func textWithLatest(info versionInfo, c *releaseCache) string {
+	s := info.String()
+	if c == nil || c.Tag == "" {
+		return s + "\nlatest unknown yet; run 'agent-tmux version --check' to look it up"
+	}
+	switch info.Status {
+	case statusCurrent:
+		s += " (up to date)"
+	case statusOutdated:
+		s += fmt.Sprintf(" (latest %s \u2014 update available)\n%s", info.Latest, upgradeHint)
+	case statusDev:
+		s += fmt.Sprintf(" (local build is a dev build; upstream release is %s)", info.Latest)
+	}
+	return s
+}
+
 func versionCommand() *command {
-	c := newCommand("version", "print the agent-tmux version")
+	c := newCommand("version", "print the agent-tmux version and, from a local cache, the latest release")
 	c.noManager = true
 	asJSON := c.fs.Bool("json", false, "print the version as JSON")
-	check := c.fs.Bool("check", false, "ask GitHub for the latest release and compare (never cached)")
+	check := c.fs.Bool("check", false, "force a fresh GitHub lookup of the latest release (bypasses and updates the cache)")
+	c.internalFlags = []string{"refresh-cache"}
 	c.run = func(inv *invocation) int {
+		if c.internalGiven["refresh-cache"] {
+			refreshCache(inv.ctx)
+			return 0
+		}
 		info := resolveVersion()
 		if *check {
 			res := checkRelease(inv.ctx, info.Version)
+			if res.Latest != "" {
+				storeFetched(res.Latest, res.etag)
+			}
 			if *asJSON {
 				out, err := json.Marshal(res)
 				if err != nil {
@@ -98,6 +128,14 @@ func versionCommand() *command {
 			fmt.Fprintln(inv.stdout, res.text())
 			return 0
 		}
+		cache := loadCache()
+		if cache != nil && cache.Tag != "" {
+			info.Status, _ = compareRelease(info.Version, cache.Tag)
+			if info.Status != statusUnknown {
+				info.Latest = cache.Tag
+			}
+		}
+		maybeRefreshInBackground(cache)
 		if *asJSON {
 			out, err := json.Marshal(info)
 			if err != nil {
@@ -106,7 +144,7 @@ func versionCommand() *command {
 			fmt.Fprintln(inv.stdout, string(out))
 			return 0
 		}
-		fmt.Fprintln(inv.stdout, info)
+		fmt.Fprintln(inv.stdout, textWithLatest(info, cache))
 		return 0
 	}
 	return c
@@ -134,6 +172,7 @@ type checkResult struct {
 	Latest  string `json:"latest"`
 	Status  string `json:"status"`
 	Error   string `json:"error,omitempty"`
+	etag    string
 }
 
 var semverRE = regexp.MustCompile(`^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
@@ -154,64 +193,86 @@ func parseSemver(v string) (core [3]int, pre bool, ok bool) {
 	return core, m[4] != "", true
 }
 
-func fetchLatestTag(ctx context.Context) (string, error) {
+// fetchLatestTag looks up the latest release tag; the ETag is kept for the cache.
+func fetchLatestTag(ctx context.Context) (tag, etag string, err error) {
+	tag, etag, _, err = fetchLatest(ctx, "")
+	return
+}
+
+// fetchLatest asks GitHub for the latest release. With a non-empty etag it
+// revalidates, and a 304 comes back as notModified.
+func fetchLatest(ctx context.Context, ifNoneMatch string) (tag, etag string, notModified bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, checkTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, latestReleaseURL, nil)
 	if err != nil {
-		return "", err
+		return "", "", false, err
 	}
 	req.Header.Set("User-Agent", "agent-tmux-version-check")
 	req.Header.Set("Accept", "application/vnd.github+json")
+	if ifNoneMatch != "" {
+		req.Header.Set("If-None-Match", ifNoneMatch)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", "", false, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotModified && ifNoneMatch != "" {
+		return "", ifNoneMatch, true, nil
+	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GitHub returned %s", resp.Status)
+		return "", "", false, fmt.Errorf("GitHub returned %s", resp.Status)
 	}
 	var body struct {
 		TagName string `json:"tag_name"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
-		return "", fmt.Errorf("bad response: %w", err)
+		return "", "", false, fmt.Errorf("bad response: %w", err)
 	}
 	if body.TagName == "" {
-		return "", errors.New("response has no tag_name")
+		return "", "", false, errors.New("response has no tag_name")
 	}
-	return body.TagName, nil
+	return body.TagName, resp.Header.Get("ETag"), false, nil
 }
 
-// checkRelease compares the installed version with the latest GitHub release.
-// Only a clean release tag (vX.Y.Z[+build]) is ever reported outdated; "dev",
-// git-describe strings and pre-releases are "dev".
+// compareRelease compares the installed version with a release tag. Only a
+// clean release tag (vX.Y.Z[+build]) is ever reported outdated; "dev",
+// git-describe strings and pre-releases are "dev". An unparseable latest tag
+// is "unknown" with an error message.
+func compareRelease(installed, latest string) (status, errMsg string) {
+	lcore, _, lok := parseSemver(latest)
+	if !lok {
+		return statusUnknown, fmt.Sprintf("latest release tag %q is not a semantic version", latest)
+	}
+	icore, ipre, iok := parseSemver(installed)
+	if !iok || ipre {
+		return statusDev, ""
+	}
+	for i := 0; i < 3; i++ {
+		if lcore[i] != icore[i] {
+			if lcore[i] > icore[i] {
+				return statusOutdated, ""
+			}
+			break
+		}
+	}
+	return statusCurrent, ""
+}
+
+// checkRelease is the live lookup behind `version --check`; it never reads
+// the cache.
 func checkRelease(ctx context.Context, installed string) checkResult {
 	res := checkResult{Version: installed}
-	latest, err := fetchLatestTag(ctx)
+	latest, etag, err := fetchLatestTag(ctx)
 	if err != nil {
 		res.Status, res.Error = statusUnknown, err.Error()
 		return res
 	}
-	lcore, _, lok := parseSemver(latest)
-	if !lok {
-		res.Status, res.Error = statusUnknown, fmt.Sprintf("latest release tag %q is not a semantic version", latest)
-		return res
-	}
-	res.Latest = latest
-	icore, ipre, iok := parseSemver(installed)
-	if !iok || ipre {
-		res.Status = statusDev
-		return res
-	}
-	res.Status = statusCurrent
-	for i := 0; i < 3; i++ {
-		if lcore[i] != icore[i] {
-			if lcore[i] > icore[i] {
-				res.Status = statusOutdated
-			}
-			break
-		}
+	res.etag = etag
+	res.Status, res.Error = compareRelease(installed, latest)
+	if res.Status != statusUnknown {
+		res.Latest = latest
 	}
 	return res
 }

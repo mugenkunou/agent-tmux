@@ -6,9 +6,22 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
+
+// No test may touch the real cache or fork a real child: TestMain (in
+// registry_test.go) points the cache at a temp dir and swaps startCmd for this
+// recorder.
+var spawned []*exec.Cmd
+
+func freshCacheDir(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	spawned = nil
+}
 
 func setVersionVars(t *testing.T, v, c, d string) {
 	t.Helper()
@@ -167,10 +180,178 @@ func TestVersionCheckJSONShape(t *testing.T) {
 	}
 }
 
-func TestVersionWithoutCheckUnchanged(t *testing.T) {
+func TestVersionNoCacheHintsAndSpawns(t *testing.T) {
+	freshCacheDir(t)
 	setVersionVars(t, "v0.1.0", "abc1234", "2026-10-29")
 	out, _ := runVersion(t)
-	if out != "agent-tmux v0.1.0 (abc1234, 2026-10-29)\n" {
+	want := "agent-tmux v0.1.0 (abc1234, 2026-10-29)\nlatest unknown yet; run 'agent-tmux version --check' to look it up\n"
+	if out != want {
 		t.Fatalf("got %q", out)
+	}
+	if len(spawned) != 1 {
+		t.Fatalf("spawned %d, want 1", len(spawned))
+	}
+	c := spawned[0]
+	if len(c.Args) != 3 || c.Args[1] != "version" || c.Args[2] != "--refresh-cache" {
+		t.Fatalf("args %v", c.Args)
+	}
+	if c.SysProcAttr == nil || !c.SysProcAttr.Setsid || c.Stdin != nil || c.Stdout != nil || c.Stderr != nil {
+		t.Fatalf("not detached: %+v", c)
+	}
+	// The attempt is recorded, so an immediate second run does not spawn again.
+	runVersion(t)
+	if len(spawned) != 1 {
+		t.Fatalf("respawned within the backoff: %d", len(spawned))
+	}
+}
+
+func TestVersionEnvDisablesSpawn(t *testing.T) {
+	freshCacheDir(t)
+	t.Setenv(noVersionCheckEv, "1")
+	runVersion(t)
+	if len(spawned) != 0 {
+		t.Fatal("spawned despite env")
+	}
+	if loadCache() != nil {
+		t.Fatal("wrote cache despite env")
+	}
+	t.Setenv(noVersionCheckEv, "0")
+	runVersion(t)
+	if len(spawned) != 1 {
+		t.Fatal("0 must not disable")
+	}
+}
+
+func TestVersionFromCache(t *testing.T) {
+	cases := []struct{ installed, tag, status, text string }{
+		{"v0.20.0", "v0.21.0", "outdated", "agent-tmux v0.20.0 (latest v0.21.0 \u2014 update available)\nupgrade:"},
+		{"v0.21.0", "v0.21.0", "current", "agent-tmux v0.21.0 (up to date)\n"},
+		{"dev", "v0.21.0", "dev", "agent-tmux dev (local build is a dev build; upstream release is v0.21.0)\n"},
+		{"v0.20.0-3-gabc1234", "v0.21.0", "dev", "agent-tmux v0.20.0-3-gabc1234 (local build"},
+	}
+	for _, c := range cases {
+		t.Run(c.installed, func(t *testing.T) {
+			freshCacheDir(t)
+			setVersionVars(t, c.installed, "", "")
+			now := time.Now()
+			saveCache(releaseCache{Tag: c.tag, CheckedAt: now, AttemptedAt: now})
+			out, _ := runVersion(t)
+			if !strings.HasPrefix(out, c.text) || strings.Contains(out, "unknown yet") {
+				t.Fatalf("got %q", out)
+			}
+			if len(spawned) != 0 {
+				t.Fatal("spawned for a fresh cache")
+			}
+			j, _ := runVersion(t, "--json")
+			var got map[string]string
+			json.Unmarshal([]byte(j), &got)
+			if got["version"] != c.installed || got["latest"] != c.tag || got["status"] != c.status {
+				t.Fatalf("json %v", got)
+			}
+		})
+	}
+}
+
+func TestVersionJSONOmitsLatestWithoutCache(t *testing.T) {
+	freshCacheDir(t)
+	t.Setenv(noVersionCheckEv, "1")
+	j, _ := runVersion(t, "--json")
+	var got map[string]any
+	json.Unmarshal([]byte(j), &got)
+	if _, ok := got["latest"]; ok {
+		t.Fatalf("got %v", got)
+	}
+	if _, ok := got["status"]; ok || got["version"] == nil {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestNeedsRefresh(t *testing.T) {
+	now := time.Now()
+	h := func(n float64) time.Time { return now.Add(-time.Duration(n * float64(time.Hour))) }
+	cases := []struct {
+		name string
+		c    *releaseCache
+		want bool
+	}{
+		{"missing", nil, true},
+		{"fresh", &releaseCache{Tag: "v1.0.0", CheckedAt: h(2), AttemptedAt: h(2)}, false},
+		{"stale", &releaseCache{Tag: "v1.0.0", CheckedAt: h(25), AttemptedAt: h(25)}, true},
+		{"stale, tried recently", &releaseCache{Tag: "v1.0.0", CheckedAt: h(25), AttemptedAt: h(0.5)}, false},
+		{"never succeeded, tried recently", &releaseCache{AttemptedAt: h(0.5)}, false},
+		{"never succeeded, tried long ago", &releaseCache{AttemptedAt: h(2)}, true},
+	}
+	for _, c := range cases {
+		if got := needsRefresh(c.c, now); got != c.want {
+			t.Errorf("%s: got %v", c.name, got)
+		}
+	}
+}
+
+func TestRefreshCacheChildWritesSilently(t *testing.T) {
+	freshCacheDir(t)
+	setVersionVars(t, "v0.1.0", "", "")
+	var gotINM string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotINM = r.Header.Get("If-None-Match")
+		if gotINM == `"abc"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", `"abc"`)
+		w.Write([]byte(`{"tag_name":"v0.9.0"}`))
+	}))
+	defer srv.Close()
+	old := latestReleaseURL
+	latestReleaseURL = srv.URL
+	t.Cleanup(func() { latestReleaseURL = old })
+
+	out, code := runVersion(t, "--refresh-cache")
+	if code != 0 || out != "" {
+		t.Fatalf("code %d out %q", code, out)
+	}
+	c := loadCache()
+	if c == nil || c.Tag != "v0.9.0" || c.ETag != `"abc"` || c.CheckedAt.IsZero() {
+		t.Fatalf("cache %+v", c)
+	}
+	// Revalidation: 304 keeps the tag and bumps checked_at.
+	c.CheckedAt = time.Now().Add(-48 * time.Hour)
+	saveCache(*c)
+	runVersion(t, "--refresh-cache")
+	c2 := loadCache()
+	if gotINM != `"abc"` || c2.Tag != "v0.9.0" || time.Since(c2.CheckedAt) > time.Minute {
+		t.Fatalf("after 304: %+v (INM %q)", c2, gotINM)
+	}
+	// Failure: silent, exit 0, keeps the old tag, records the attempt only.
+	fakeLatest(t, 500, "x")
+	c2.CheckedAt = time.Now().Add(-48 * time.Hour)
+	c2.AttemptedAt = c2.CheckedAt
+	saveCache(*c2)
+	out, code = runVersion(t, "--refresh-cache")
+	c3 := loadCache()
+	if code != 0 || out != "" || c3.Tag != "v0.9.0" || time.Since(c3.AttemptedAt) > time.Minute || time.Since(c3.CheckedAt) < 24*time.Hour {
+		t.Fatalf("after failure: %d %q %+v", code, out, c3)
+	}
+}
+
+func TestVersionCheckWritesCache(t *testing.T) {
+	freshCacheDir(t)
+	fakeLatest(t, 200, `{"tag_name":"v0.20.0"}`)
+	runVersion(t, "--check")
+	if c := loadCache(); c == nil || c.Tag != "v0.20.0" {
+		t.Fatalf("cache %+v", c)
+	}
+	freshCacheDir(t)
+	fakeLatest(t, 500, "x")
+	runVersion(t, "--check")
+	if loadCache() != nil {
+		t.Fatal("failed check wrote a cache")
+	}
+}
+
+func TestRefreshFlagIsHidden(t *testing.T) {
+	c := versionCommand()
+	if strings.Contains(c.usageLine(), "refresh-cache") || c.fs.Lookup("refresh-cache") != nil {
+		t.Fatal("refresh-cache leaked into the public surface")
 	}
 }
