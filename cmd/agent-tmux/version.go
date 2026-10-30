@@ -156,7 +156,7 @@ var latestReleaseURL = "https://api.github.com/repos/mugenkunou/agent-tmux/relea
 
 const (
 	checkTimeout = 3 * time.Second
-	upgradeHint  = "upgrade: go install github.com/mugenkunou/agent-tmux/cmd/agent-tmux@latest, or download from https://github.com/mugenkunou/agent-tmux/releases"
+	upgradeHint  = "upgrade: download from https://github.com/mugenkunou/agent-tmux/releases/latest"
 )
 
 // Statuses of `version --check`. The JSON shape is a contract with ws-tool.

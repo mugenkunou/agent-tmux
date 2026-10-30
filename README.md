@@ -24,10 +24,9 @@ Anyone attached can watch at any time, or temporarily claim the input lock to en
 
 From a release (Linux amd64 and arm64): download the `.tar.gz` for your CPU from the
 [releases page](https://github.com/mugenkunou/agent-tmux/releases), check it against
-`checksums.txt`, and put `agent-tmux` on your `PATH`. Or with Go:
+`checksums.txt`, and put `agent-tmux` on your `PATH`:
 
 ```bash
-go install github.com/mugenkunou/agent-tmux/cmd/agent-tmux@latest
 agent-tmux version
 ```
 
