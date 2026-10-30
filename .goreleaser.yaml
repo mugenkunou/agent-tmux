@@ -17,13 +17,11 @@ builds:
       - -s -w -X main.version={{.Tag}} -X main.commit={{.ShortCommit}} -X main.date={{.Date}}
 
 archives:
+  # Raw binaries, no archive: assets are agent-tmux-linux-amd64 and
+  # agent-tmux-linux-arm64, so releases/latest/download/<name> is a stable URL.
   - id: agent-tmux
-    formats: [tar.gz]
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    files:
-      - LICENSE
-      - README.md
-      - SKILL.md
+    formats: [binary]
+    name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
 
 checksum:
   name_template: checksums.txt

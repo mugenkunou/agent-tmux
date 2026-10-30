@@ -107,7 +107,7 @@ func TestVersionCheckStatuses(t *testing.T) {
 	}{
 		{"current", "v0.19.0", "current", "agent-tmux v0.19.0 (latest v0.19.0)", 200, `{"tag_name":"v0.19.0"}`},
 		{"ahead", "v0.20.0", "current", "", 200, `{"tag_name":"v0.19.0"}`},
-		{"outdated", "v0.19.0", "outdated", "agent-tmux v0.19.0: update available, latest is v0.20.0\nupgrade:", 200, `{"tag_name":"v0.20.0"}`},
+		{"outdated", "v0.19.0", "outdated", "agent-tmux v0.19.0: update available, latest is v0.20.0\nupgrade", 200, `{"tag_name":"v0.20.0"}`},
 		{"outdated numeric", "v0.9.0", "outdated", "", 200, `{"tag_name":"v0.10.0"}`},
 		{"dev", "dev", "dev", "agent-tmux dev: local build is a dev build; upstream release is v0.20.0", 200, `{"tag_name":"v0.20.0"}`},
 		{"describe", "v0.19.0-3-gabc1234-dirty", "dev", "", 200, `{"tag_name":"v0.20.0"}`},
@@ -224,7 +224,7 @@ func TestVersionEnvDisablesSpawn(t *testing.T) {
 
 func TestVersionFromCache(t *testing.T) {
 	cases := []struct{ installed, tag, status, text string }{
-		{"v0.20.0", "v0.21.0", "outdated", "agent-tmux v0.20.0 (latest v0.21.0 \u2014 update available)\nupgrade:"},
+		{"v0.20.0", "v0.21.0", "outdated", "agent-tmux v0.20.0 (latest v0.21.0 \u2014 update available)\nupgrade"},
 		{"v0.21.0", "v0.21.0", "current", "agent-tmux v0.21.0 (up to date)\n"},
 		{"dev", "v0.21.0", "dev", "agent-tmux dev (local build is a dev build; upstream release is v0.21.0)\n"},
 		{"v0.20.0-3-gabc1234", "v0.21.0", "dev", "agent-tmux v0.20.0-3-gabc1234 (local build"},
@@ -353,5 +353,29 @@ func TestRefreshFlagIsHidden(t *testing.T) {
 	c := versionCommand()
 	if strings.Contains(c.usageLine(), "refresh-cache") || c.fs.Lookup("refresh-cache") != nil {
 		t.Fatal("refresh-cache leaked into the public surface")
+	}
+}
+
+func TestUpgradeHint(t *testing.T) {
+	oo, oa, oe := hintGOOS, hintGOARCH, hintExe
+	t.Cleanup(func() { hintGOOS, hintGOARCH, hintExe = oo, oa, oe })
+	hintExe = func() (string, error) { return "/home/u/.local/bin/agent-tmux", nil }
+
+	hintGOOS, hintGOARCH = "linux", "amd64"
+	want := "upgrade (linux amd64):\n" +
+		"  curl -fLO https://github.com/mugenkunou/agent-tmux/releases/latest/download/agent-tmux-linux-amd64\n" +
+		"  chmod +x agent-tmux-linux-amd64\n" +
+		"  mv agent-tmux-linux-amd64 /home/u/.local/bin/agent-tmux"
+	if got := upgradeHint(); got != want {
+		t.Fatalf("got %q", got)
+	}
+	r := checkResult{Version: "v0.1.0", Latest: "v0.2.0", Status: "outdated"}
+	if !strings.HasSuffix(r.text(), "\n"+want) {
+		t.Fatalf("check text %q", r.text())
+	}
+
+	hintGOARCH = "arm64"
+	if got := upgradeHint(); got != "upgrade: download the binary for your system from https://github.com/mugenkunou/agent-tmux/releases/latest" {
+		t.Fatalf("got %q", got)
 	}
 }

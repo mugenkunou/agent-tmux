@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -93,7 +96,7 @@ func textWithLatest(info versionInfo, c *releaseCache) string {
 	case statusCurrent:
 		s += " (up to date)"
 	case statusOutdated:
-		s += fmt.Sprintf(" (latest %s \u2014 update available)\n%s", info.Latest, upgradeHint)
+		s += fmt.Sprintf(" (latest %s \u2014 update available)\n%s", info.Latest, upgradeHint())
 	case statusDev:
 		s += fmt.Sprintf(" (local build is a dev build; upstream release is %s)", info.Latest)
 	}
@@ -156,7 +159,6 @@ var latestReleaseURL = "https://api.github.com/repos/mugenkunou/agent-tmux/relea
 
 const (
 	checkTimeout = 3 * time.Second
-	upgradeHint  = "upgrade: download from https://github.com/mugenkunou/agent-tmux/releases/latest"
 )
 
 // Statuses of `version --check`. The JSON shape is a contract with ws-tool.
@@ -282,9 +284,43 @@ func (r checkResult) text() string {
 	case statusCurrent:
 		return fmt.Sprintf("agent-tmux %s (latest %s)", r.Version, r.Latest)
 	case statusOutdated:
-		return fmt.Sprintf("agent-tmux %s: update available, latest is %s\n%s", r.Version, r.Latest, upgradeHint)
+		return fmt.Sprintf("agent-tmux %s: update available, latest is %s\n%s", r.Version, r.Latest, upgradeHint())
 	case statusDev:
 		return fmt.Sprintf("agent-tmux %s: local build is a dev build; upstream release is %s", r.Version, r.Latest)
 	}
 	return fmt.Sprintf("agent-tmux %s: could not check latest release: %s", r.Version, strings.TrimSpace(r.Error))
+}
+
+const releasesPage = "https://github.com/mugenkunou/agent-tmux/releases/latest"
+
+// Seams for tests: the platform and the running binary's path.
+var (
+	hintGOOS   = runtime.GOOS
+	hintGOARCH = runtime.GOARCH
+	hintExe    = func() (string, error) {
+		p, err := os.Executable()
+		if err != nil {
+			return "", err
+		}
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			p = r
+		}
+		return p, nil
+	}
+)
+
+// upgradeHint says how to replace this binary with the latest release.
+func upgradeHint() string {
+	if hintGOOS != "linux" || hintGOARCH != "amd64" {
+		return "upgrade: download the binary for your system from " + releasesPage
+	}
+	exe, err := hintExe()
+	if err != nil || exe == "" {
+		exe = "<path of agent-tmux>"
+	}
+	const name = "agent-tmux-linux-amd64"
+	return "upgrade (linux amd64):\n" +
+		"  curl -fLO " + releasesPage + "/download/" + name + "\n" +
+		"  chmod +x " + name + "\n" +
+		"  mv " + name + " " + exe
 }

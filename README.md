@@ -22,13 +22,19 @@ Anyone attached can watch at any time, or temporarily claim the input lock to en
 
 ## Install
 
-From a release (Linux amd64 and arm64): download the `.tar.gz` for your CPU from the
-[releases page](https://github.com/mugenkunou/agent-tmux/releases), check it against
-`checksums.txt`, and put `agent-tmux` on your `PATH`:
+From a release (Linux amd64; for arm64 use `agent-tmux-linux-arm64` instead):
 
 ```bash
+mkdir -p ~/.local/bin
+curl -fLO https://github.com/mugenkunou/agent-tmux/releases/latest/download/agent-tmux-linux-amd64
+chmod +x agent-tmux-linux-amd64
+mv agent-tmux-linux-amd64 ~/.local/bin/agent-tmux
 agent-tmux version
 ```
+
+The release assets are plain binaries, not archives. To verify one, download `checksums.txt`
+from the same release into the same folder and run
+`sha256sum -c --ignore-missing checksums.txt` before the `chmod`/`mv`.
 
 From a clone:
 
@@ -267,7 +273,7 @@ latest unknown yet; run 'agent-tmux version --check' to look it up
 ```
 
 The text goes after the commit and date when the build has them. An outdated build adds a
-second line with how to upgrade. Anything that is not a clean `vX.Y.Z` release (`dev`, a
+few more lines with the exact commands to upgrade (Linux amd64; other systems get a link to the releases page). Anything that is not a clean `vX.Y.Z` release (`dev`, a
 `git describe` string, a pre-release) is a dev build and is never reported as outdated.
 
 The cache is `${XDG_CACHE_HOME:-~/.cache}/agent-tmux/release.json` and is fresh for 24 hours.
