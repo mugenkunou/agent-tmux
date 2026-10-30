@@ -262,6 +262,27 @@ segments.
 {"version":"v0.1.0","commit":"abc1234","date":"2026-10-29T10:00:00Z"}
 ```
 
+`version --check` always asks GitHub (3s timeout, no cache) for the latest release and
+compares it with this binary. Anything that is not a clean `vX.Y.Z` release (`dev`, a
+`git describe` string, a pre-release) is a dev build and is never reported as outdated.
+It exits 0 for every status; a failed lookup is status `unknown`.
+
+```text
+agent-tmux v0.19.0 (latest v0.19.0)
+agent-tmux v0.19.0: update available, latest is v0.20.0
+agent-tmux dev: local build is a dev build; upstream release is v0.20.0
+agent-tmux v0.19.0: could not check latest release: <error>
+```
+
+`version --check --json` prints one object: `version` (installed), `latest` (`""` when
+unknown), `status` (`current`, `outdated`, `dev` or `unknown`) and `error` (only with
+`unknown`):
+
+```json
+{"version":"v0.19.0","latest":"v0.20.0","status":"outdated"}
+{"version":"v0.19.0","latest":"","status":"unknown","error":"GitHub returned 500 Internal Server Error"}
+```
+
 ## Commands
 
 | Command | Purpose |
@@ -285,7 +306,7 @@ segments.
 | `doctor` | Check tmux, show the socket and recordings paths and each session's recorder |
 | `completion` | Print the shell completion script for `bash`, `zsh` or `fish` |
 | `skill` | Print `SKILL.md`, matching this binary, for a skill manager to keep |
-| `version` | Print the version, commit and build date (`--json` for scripts) |
+| `version` | Print the version, commit and build date (`--json` for scripts); `--check` asks GitHub for the latest release |
 
 ## Agent Integration
 
