@@ -360,14 +360,23 @@ func (m *Manager) Send(ctx context.Context, name, text string, enter bool) error
 		return errors.New("text cannot contain a NUL byte")
 	}
 	return m.withAgentControl(ctx, name, "send", func() error {
+		// The policy sees the whole line being typed, so a command cannot
+		// be split across --no-enter sends to slip past it.
+		pending := m.pendingLine(ctx, name)
+		if err := refusalAfter("send", pending, text); err != nil {
+			return err
+		}
+		line := pending + text
 		if _, err := m.run(ctx, nil, "send-keys", "-t", target(name), "-l", "--", text); err != nil {
 			return err
 		}
 		if enter {
-			_, err := m.run(ctx, nil, "send-keys", "-t", target(name), "Enter")
-			return err
+			if _, err := m.run(ctx, nil, "send-keys", "-t", target(name), "Enter"); err != nil {
+				return err
+			}
+			line = ""
 		}
-		return nil
+		return m.setPendingLine(ctx, name, line)
 	})
 }
 
@@ -376,11 +385,36 @@ func (m *Manager) SendKeys(ctx context.Context, name string, keys []string) erro
 		return errors.New("at least one key is required")
 	}
 	return m.withAgentControl(ctx, name, "key", func() error {
+		// tmux types any argument that is not a key name as literal text,
+		// so keys get the same policy as send.
+		line, err := typedLine(m.pendingLine(ctx, name), keys)
+		if err != nil {
+			return err
+		}
 		args := []string{"send-keys", "-t", target(name), "--"}
 		args = append(args, keys...)
-		_, err := m.run(ctx, nil, args...)
-		return err
+		if _, err := m.run(ctx, nil, args...); err != nil {
+			return err
+		}
+		return m.setPendingLine(ctx, name, line)
 	})
+}
+
+// pendingLine is the text scripted callers have typed into the session since
+// it last pressed Enter (send --no-enter, literal keys). It is a best guess
+// at the shell's input line: a human typing in between is not seen, so a
+// claim clears it.
+func (m *Manager) pendingLine(ctx context.Context, name string) string {
+	output, err := m.run(ctx, nil, "show-option", "-qv", "-t", exact(name), "@agent-tmux-pending")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSuffix(output, "\n")
+}
+
+func (m *Manager) setPendingLine(ctx context.Context, name, line string) error {
+	_, err := m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-pending", line)
+	return err
 }
 
 func (m *Manager) WaitFor(ctx context.Context, name, text string, timeout time.Duration, history int) (string, error) {
@@ -683,6 +717,10 @@ func (m *Manager) claim(ctx context.Context, name, actorID, tty string) error {
 		if _, err := m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-owner", actorID); err != nil {
 			return err
 		}
+		// Whatever a scripted caller left half-typed is now the human's.
+		if err := m.setPendingLine(ctx, name, ""); err != nil {
+			return err
+		}
 		if _, err := m.run(ctx, nil, "set-option", "-t", exact(name), "@agent-tmux-owner-tty", tty); err != nil {
 			return err
 		}
@@ -759,7 +797,9 @@ func (m *Manager) readGeneration(ctx context.Context, name string) int {
 }
 
 // withAgentControl runs a scripted write (send, key) when nobody controls the
-// session, and logs it as event, without what was sent.
+// session, and logs it as event, without what was sent. Input the send
+// policy refuses is logged as "refused" with the rules it broke, also
+// without the text.
 func (m *Manager) withAgentControl(ctx context.Context, name, event string, action func() error) error {
 	if err := validateSessionName(name); err != nil {
 		return err
@@ -785,6 +825,10 @@ func (m *Manager) withAgentControl(ctx context.Context, name, event string, acti
 			return fmt.Errorf("actor %q controls the terminal: %w", owner, ErrControlled)
 		}
 		if err := action(); err != nil {
+			var refused *RefusedError
+			if errors.As(err, &refused) {
+				logEvent(dir, "refused", recording.Fields{"actor": actorID(), "command": event, "rules": refused.Rules()})
+			}
 			return err
 		}
 		logEvent(dir, event, recording.Fields{"actor": actorID()})

@@ -11,12 +11,16 @@ import (
 )
 
 func main() {
-	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(runWithStdin(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
 // run dispatches through the command registry (see command.go); it contains
-// no per-command knowledge of its own.
+// no per-command knowledge of its own. Standard input is not connected.
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	return runWithStdin(ctx, args, nil, stdout, stderr)
+}
+
+func runWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cmds := commands()
 	if len(args) == 0 {
 		printUsage(stderr, cmds)
@@ -35,7 +39,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	inv := &invocation{ctx: ctx, args: rest, stdout: stdout, stderr: stderr}
+	inv := &invocation{ctx: ctx, args: rest, stdin: stdin, stdout: stdout, stderr: stderr}
 	if !cmd.noManager {
 		manager, err := termshare.NewManager()
 		if err != nil {
@@ -47,10 +51,17 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return cmd.run(inv)
 }
 
+// exitRefused is the exit status for input the send policy refused, so a
+// script can tell it apart from a failure to reach the session.
+const exitRefused = 3
+
 func fail(stderr io.Writer, err error) int {
 	fmt.Fprintln(stderr, "agent-tmux:", err)
 	if errors.Is(err, context.DeadlineExceeded) {
 		return 124
+	}
+	if errors.Is(err, termshare.ErrRefused) {
+		return exitRefused
 	}
 	return 1
 }

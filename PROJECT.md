@@ -833,3 +833,52 @@ paged through `less -R +G` on a terminal, plain when piped, `--raw` byte-exact);
 uses the same rendering, so its line numbers are lines of `show`'s plain output. `rm`
 moves recordings to the XDG trash (`internal/trash`) and refuses a live one, moving
 nothing in that call.
+
+## 17. Send Policy (readable input only)
+
+Q: Why does `send` refuse some input?
+A: Because of a real incident (Nov 2026). An agent sent a read-only kubectl script to
+a restricted host as `echo <base64> | base64 -d | bash > /tmp/recon.out 2>&1; cat
+/tmp/recon.out`, so it wouldn't have to quote a jq filter. The host's audit log showed
+only `base64 -d`, `bash > /tmp/recon.out` and `cat`. `echo` is a builtin, so the script
+never appears. The infra team flagged it as a dropper. The recordings held two earlier
+cases of the same pattern, one piped into `sudo -n bash`. A prompt rule alone hadn't
+stopped it. `send` is the one choke point every agent (Claude, Copilot, Codex) goes
+through, so the policy lives there: `internal/termshare/policy.go`.
+
+Q: What is refused, and what only warns?
+A: Refused: piping into a shell or interpreter, `eval` and its relatives, 80+
+character base64 or hex runs, decode-and-run inside an interpreter, executing or
+`chmod`-ing a file in a temp dir, and more than one line per send. Warned: output
+redirected into a temp dir, and attacker vocabulary (recon, payload, ...). Words only
+warn because "payload" is normal in JSON work, and a refusal there would teach agents
+to dodge the check. Plain `| base64 -d` is allowed: decoding a k8s secret is routine,
+and nothing runs the result. The rules were checked against every command in the
+author's recordings: 6 of 331 were refused, all of them real problems.
+
+Q: Why is there no override flag?
+A: An agent that gets refused will pass any flag the refusal mentions. The override is
+a human: claim the terminal (`Ctrl-T`) and type the command. Human keystrokes go
+straight to the pane and are never checked.
+
+Q: Can it be bypassed by splitting the command?
+A: Not through agent-tmux. The session option `@agent-tmux-pending` keeps what
+scripted callers have typed since their last Enter (`send --no-enter`, and literal `key`
+arguments, since tmux types any non-key-name argument as text). The policy checks
+pending plus new text. `C-c`/`C-u` clear it, and so does a claim, because the line is
+the human's from then on. It is a best guess at the shell's input line, not a parse of
+it.
+
+Q: Why `send --stdin`?
+A: It removes the reason for the workaround. A quoted heredoc reaches `send-keys -l`
+untouched, so jq filters and `$VARS` need no escaping and no encoding. It reads one
+line (64 KiB cap), and one trailing newline is dropped because a heredoc always ends
+with one.
+
+Q: Does this make the event log record what was sent?
+A: No. §9 still holds: events never carry text. A refusal is logged as `refused` with
+the command (`send`/`key`) and the rule ids only.
+
+Q: Exit status?
+A: 3 for a refusal, so scripts can tell "refused" from "couldn't reach the session"
+(1) and a timeout (124).

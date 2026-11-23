@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,19 +130,68 @@ func screenCommand() *command {
 }
 
 func sendCommand() *command {
-	c := newCommand("send", "send text (then Enter) to a session; works for routine commands and interactive programs alike")
+	c := newCommand("send", "send one command (then Enter) to a session; works for routine commands and interactive programs alike")
 	noEnter := c.fs.Bool("no-enter", false, "do not press Enter after sending text")
-	c.args = []positional{sessionArg, {name: "text", kind: argFree, variadic: true}}
+	fromStdin := c.fs.Bool("stdin", false, "read the text from standard input, exactly as written (one line; use a quoted heredoc for awkward quoting)")
+	c.args = []positional{sessionArg, {name: "text", kind: argFree, variadic: true, optional: true}}
 	c.run = func(inv *invocation) int {
 		name := inv.args[0]
 		text := strings.Join(inv.args[1:], " ")
+		switch {
+		case *fromStdin && len(inv.args) > 1:
+			fmt.Fprintln(inv.stderr, "agent-tmux: send: give the text as arguments or with --stdin, not both")
+			return 2
+		case *fromStdin:
+			read, err := readStdinText(inv.stdin)
+			if err != nil {
+				return fail(inv.stderr, err)
+			}
+			text = read
+		case len(inv.args) == 1:
+			fmt.Fprintln(inv.stderr, "agent-tmux: send: no text to send (give it as arguments or with --stdin)")
+			return 2
+		}
 		if err := inv.manager.Send(inv.ctx, name, text, !*noEnter); err != nil {
 			return fail(inv.stderr, err)
 		}
 		fmt.Fprintf(inv.stdout, "sent to %s\n", name)
+		printPolicyWarnings(inv.stderr, text)
 		return 0
 	}
 	return c
+}
+
+// maxStdinText bounds send --stdin: one command line, not a file upload.
+const maxStdinText = 64 << 10
+
+// readStdinText reads send --stdin's text. A heredoc always ends in a
+// newline, and send presses Enter itself, so one trailing newline is
+// dropped; any other newline is left for the send policy to refuse.
+func readStdinText(stdin io.Reader) (string, error) {
+	if stdin == nil {
+		return "", errors.New("send --stdin: no standard input")
+	}
+	data, err := io.ReadAll(io.LimitReader(stdin, maxStdinText+1))
+	if err != nil {
+		return "", fmt.Errorf("send --stdin: %w", err)
+	}
+	if len(data) > maxStdinText {
+		return "", fmt.Errorf("send --stdin: more than %d bytes; send one command at a time", maxStdinText)
+	}
+	text := strings.TrimSuffix(strings.TrimSuffix(string(data), "\n"), "\r")
+	if text == "" {
+		return "", errors.New("send --stdin: standard input is empty")
+	}
+	return text, nil
+}
+
+// printPolicyWarnings reports what the send policy let through but flagged.
+func printPolicyWarnings(stderr io.Writer, text string) {
+	for _, f := range termshare.CheckCommand(text) {
+		if f.Level == termshare.LevelWarn {
+			fmt.Fprintf(stderr, "agent-tmux: warning: %s (%s). %s\n", f.What, f.Rule, f.Fix)
+		}
+	}
 }
 
 func keyCommand() *command {

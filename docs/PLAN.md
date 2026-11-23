@@ -58,7 +58,7 @@ two-terminal test (`cmd/agent-tmux/exclusive_test.go`).
     meta.json         name, started_at, ended_at, host, first_segment
     stdout.NNNNNN.log raw pane output, byte-exact, ~64 MB per segment
     stdout.NNNNNN.timing  "<delay> <bytes>" lines (scriptreplay format)
-    events.jsonl      create, attach, detach, claim, release, send, key, respawn,
+    events.jsonl      create, attach, detach, claim, release, send, key, refused, respawn,
                       kill, rotated, recorder-died
   ```
 - A name collision gets `-2`, `-3`... Nothing is overwritten.

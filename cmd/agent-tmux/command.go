@@ -54,6 +54,7 @@ type invocation struct {
 	ctx            context.Context
 	manager        *termshare.Manager // nil when the command sets noManager
 	args           []string
+	stdin          io.Reader // nil in tests that don't set it
 	stdout, stderr io.Writer
 }
 

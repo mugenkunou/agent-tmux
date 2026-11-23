@@ -83,6 +83,46 @@ agent-tmux screen --history 200 <session>
 
 Do not immediately retry a stalled command; duplicate input may reach the wrong prompt.
 
+## Audit-Log Hygiene
+
+Remote hosts log every process they start, and a security team reads that log with
+no context. A command whose meaning is hidden looks like an attack, even when it is
+harmless. For example, `echo <base64> | base64 -d | bash > /tmp/recon.out` shows up
+there as `base64 -d`, then `bash`, then `cat /tmp/recon.out`. `echo` is a shell
+builtin, so the script itself never appears. A read-only kubectl check sent this way
+got the user flagged by their infra team.
+
+Before each `send`, read the command the way that team will see it in a process list.
+If it doesn't plainly show what it does, rewrite it.
+
+- Send one command per `send`, written out in full. Don't batch commands into a
+  script, and don't write a script locally and ship it over.
+- Never encode, compress or obfuscate a command or its arguments (base64, hex, xxd,
+  gzip, `eval`).
+- Never pipe anything into a shell or interpreter (`| bash`, `| sh`, `| python3`,
+  `bash <(...)`, `sh -c "$(...)"`).
+- Never write a script or an output file to `/tmp` on a remote host. Let output go to
+  the screen and read it with `screen`, `wait` or `show`.
+- Use neutral names for echo markers and files, such as `checks`, `status` or `survey`.
+  Never use `recon`, `payload`, `exploit` or similar, even when the task was described
+  in those words.
+- When quoting is awkward (jq filters, nested quotes, `$VARS` meant for the remote
+  shell), use `--stdin` with a quoted heredoc. The text arrives exactly as written:
+
+  ```bash
+  agent-tmux send --stdin <session> <<'EOF'
+  kubectl get deploy web -n prod -o json | jq '{replicas: .spec.replicas, image: .spec.template.spec.containers[0].image}'
+  EOF
+  ```
+
+`send` and `key` enforce most of this and refuse input that breaks it. When that
+happens, they exit with status 3, nothing is typed, and the message names the rule
+that matched. Rewrite the command as plain text. Don't work around the check by
+splitting it across `--no-enter` sends or literal keys, which are checked too, or by
+any other route. There is no override flag. If a command truly needs it, tell the user
+and let them take control and type it themselves. A warning (`tmp-output`,
+`loaded-words`) still sends the command; fix the habit on the next one.
+
 ## Reading Back History
 
 Every session is recorded from its first byte: everything the pane printed, kept after

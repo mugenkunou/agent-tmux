@@ -88,6 +88,15 @@ read the result — there is no `run` call that returns an exit code in one step
 line, make the call, interpret the result. If the exit code matters, follow up with
 `agent-tmux send <session> 'echo $?'`.
 
+**Readable commands only:** the remote host's audit log is read by a security team
+with no context. Send one plain command per `send`. Never encode a command (base64,
+hex, gzip), pipe into a shell or interpreter (`| bash`, `| sh`, `| python3`), use
+`eval`, or drop scripts or output files in `/tmp`. Name markers and files neutrally
+(`checks`, not `recon`). When quoting is awkward, use `agent-tmux send --stdin
+<session>` with a quoted heredoc. `send` refuses the rest (exit status 3). Rewrite
+the command instead of working around the refusal, and if it truly needs it, ask the
+user to take control and type it.
+
 **READ-WRITE commands:** before running, ask in chat for:
 
 - The exact command you intend to run

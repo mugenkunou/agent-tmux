@@ -97,6 +97,42 @@ running deep inside an SSH/sudo session: `send` the text, then `screen`/`wait` t
 what happened. There's no separate "run and wait for the exit code" fast path — see
 [PROJECT.md §14](PROJECT.md#14-why-there-is-no-run-command) for why.
 
+`send` takes one command per call. When the quoting gets hard (jq filters, nested
+quotes, `$VARS` meant for the remote shell), `--stdin` reads the command from a quoted
+heredoc and types it exactly as written:
+
+```bash
+agent-tmux send --stdin work <<'EOF'
+kubectl get deploy web -o json | jq '{replicas: .spec.replicas}'
+EOF
+```
+
+### Send policy
+
+Remote hosts log every process they start, and a security team reads that log with
+no context. `send` and `key` refuse input whose meaning that log can't show. They exit
+with status 3, type nothing, and name the rule that matched:
+
+| Rule | Refuses |
+| --- | --- |
+| `pipe-to-shell` | piping into a shell or interpreter (`\| bash`, `\| sudo sh -s`, `\| python3`, `\| xargs sh -c`) |
+| `eval` | `eval`, `source <(...)`, `bash <(...)`, `sh <<<`, `sh -c "$(...)"` |
+| `encoded-blob` | a run of 80+ base64 or hex characters |
+| `decode-call` | interpreter code that decodes data and runs it (`exec(b64decode(...))`) |
+| `tmp-exec` | running, or `chmod`-ing, a file under `/tmp`, `/var/tmp` or `/dev/shm` |
+| `multi-line` | more than one line in one send |
+
+Two more rules only warn, on stderr, and the command is still sent: `tmp-output` (output
+redirected into a temp file) and `loaded-words` (recon, payload, exploit and similar).
+`... | base64 -d` on its own, such as decoding a Kubernetes secret, is fine, because
+nothing runs the result.
+
+The policy checks the whole line being typed, so a command split across `send
+--no-enter` calls or typed as literal `key` arguments is checked as one. There is no
+override flag. A human who has claimed the session types straight into the pane and
+is never checked. Each refusal is logged as a `refused` event with the rules it broke,
+without the text.
+
 Someone can observe and take over from a real terminal, with a single key:
 
 ```bash
@@ -193,7 +229,8 @@ There is no flag and no opt-out. What is recorded is the pane's **output**, exac
 the terminal received it. Input is never recorded on its own: what you type shows up
 only where the terminal echoed it, so passwords and TOTP codes (which don't echo) stay
 out. `send`, `key`, `claim`, `release`, attach and detach are logged as events, without
-the text sent.
+the text sent. So are refusals by the [send policy](#send-policy) (`refused`, with the
+rules that matched).
 
 Recordings live in `~/.local/state/agent-tmux/` (`$XDG_STATE_HOME/agent-tmux` if set,
 `$AGENT_TMUX_STATE_DIR` overrides both; `agent-tmux path` or `doctor` prints it), one directory per session, named
@@ -205,7 +242,7 @@ web-2026-10-29-1402/
   meta.json              name, id, host, started_at, ended_at, first_segment, first_segment_at
   stdout.000001.log      raw output, byte-exact
   stdout.000001.timing   "<delay> <bytes>" per write (scriptreplay format)
-  events.jsonl           create, attach, detach, claim, release, send, key, respawn, kill, rotated, recorder-died
+  events.jsonl           create, attach, detach, claim, release, send, key, refused, respawn, kill, rotated, recorder-died
 ```
 
 A recording outlives its session: `kill` ends the shell and finishes `meta.json`, the
@@ -333,7 +370,7 @@ unknown), `status` and `error` (only with `unknown`):
 | Command | Purpose |
 | --- | --- |
 | `create` | Start a persistent Bash session (50000 lines of scrollback, `--history` to change); from a terminal, attaches immediately (same as `open`) |
-| `send` | Send text, useful for routine commands and interactive programs alike |
+| `send` | Send one command (`--stdin` reads it from a heredoc), useful for routine commands and interactive programs alike; refuses unreadable input ([send policy](#send-policy)) |
 | `key` | Send keys such as `C-c`, `C-z`, or `Escape` |
 | `screen` | Read the current rendered terminal |
 | `wait` | Wait until expected text appears |

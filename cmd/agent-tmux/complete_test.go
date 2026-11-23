@@ -186,7 +186,7 @@ func TestWalkerCases(t *testing.T) {
 		{"value flag swallows its argument", []string{"screen", "--history", "10", ""}, []string{"alpha", "alpine", "beta"}},
 		{"bool flag does not swallow", []string{"send", "--no-enter", "al"}, []string{"alpha", "alpine"}},
 		{"flag=value is one word", []string{"screen", "--history=10", "b"}, []string{"beta"}},
-		{"used flag not offered again", []string{"send", "--no-enter", "--"}, []string{}},
+		{"used flag not offered again", []string{"send", "--no-enter", "--"}, []string{"--stdin"}},
 		{"single dash matches long flag", []string{"send", "-n"}, []string{"--no-enter"}},
 		{"dash after positional is data", []string{"send", "alpha", "-"}, []string{}},
 		{"double dash ends flags", []string{"kill", "--", "-"}, []string{}},
