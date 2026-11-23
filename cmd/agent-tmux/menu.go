@@ -12,7 +12,7 @@ import (
 // returns true when `open` should end.
 func escapeMenu(inv *invocation, name string) bool {
 	for {
-		fmt.Fprintf(inv.stdout, "\r\nagent-tmux %s: [d]etach  [k]ill session  [r]estart shell  [c] send Ctrl-C  [/] history  [any other key] back ", name)
+		fmt.Fprintf(inv.stdout, "\r\nagent-tmux %s: [d]etach  [k]ill session  [r]estart shell  [c] send Ctrl-C  [/] history  [p]ath of recording  [any other key] back ", name)
 		key, err := readKey(os.Stdin)
 		fmt.Fprint(inv.stdout, "\r\n")
 		if err != nil {
@@ -52,6 +52,13 @@ func escapeMenu(inv *invocation, name string) bool {
 				continue
 			}
 			return false
+		case 'p', 'P':
+			if s, err := inv.manager.Status(inv.ctx, name); err == nil && s.Recording != "" {
+				fmt.Fprint(inv.stdout, recordingNote(s.Recording))
+			} else {
+				fmt.Fprintln(inv.stdout, "this session has no recording")
+			}
+			continue
 		case 'c', 'C':
 			if err := inv.manager.SendKeys(inv.ctx, name, []string{"C-c"}); err != nil {
 				fail(inv.stderr, err)

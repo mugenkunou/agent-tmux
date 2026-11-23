@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/mugenkunou/agent-tmux/internal/recording"
 	"github.com/mugenkunou/agent-tmux/internal/termshare"
 )
 
@@ -283,5 +284,8 @@ Usage:
 			continue
 		}
 		fmt.Fprintf(w, "  %s\n      %s\n", c.usageLine(), c.summary)
+	}
+	if root, err := recording.Root(); err == nil {
+		fmt.Fprintf(w, "\nRecordings: %s\n  (override with $AGENT_TMUX_STATE_DIR, else $XDG_STATE_HOME/agent-tmux; 'agent-tmux path' prints it)\n", tildePath(root))
 	}
 }

@@ -1,9 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mugenkunou/agent-tmux/internal/recording"
@@ -22,6 +25,7 @@ func commands() []*command {
 		createCommand(),
 		lsCommand(),
 		showCommand(),
+		pathCommand(),
 		grepCommand(),
 		rmCommand(),
 		statusCommand(),
@@ -68,6 +72,7 @@ func createCommand() *command {
 			return fail(inv.stderr, err)
 		}
 		fmt.Fprintf(inv.stdout, "created %s\n", name)
+		fmt.Fprint(inv.stdout, sessionRecordingNote(inv, name))
 		// From a real terminal, dropping straight into the session is what the
 		// user expects; scripted callers (no tty) can't attach and get the hint.
 		if stdinIsTerminal() {
@@ -207,6 +212,7 @@ func openCommand() *command {
 }
 
 func openSession(inv *invocation, name string) int {
+	note := sessionRecordingNote(inv, name)
 	hooks := termshare.OpenHooks{
 		Phase: func(owner string) {
 			if owner == termshare.OwnerUnclaimed {
@@ -220,6 +226,9 @@ func openSession(inv *invocation, name string) int {
 	if err := inv.manager.Open(inv.ctx, name, hooks); err != nil {
 		return fail(inv.stderr, err)
 	}
+	// Printed on the way out, so the user's scrollback says where this
+	// session's recording is.
+	fmt.Fprint(inv.stdout, note)
 	return 0
 }
 
@@ -240,10 +249,11 @@ func restartCommand() *command {
 	c := newCommand("restart", "kill whatever runs in a session (e.g. a frozen ssh) and start a fresh shell in its place")
 	c.args = []positional{sessionArg}
 	c.run = func(inv *invocation) int {
+		note := sessionRecordingNote(inv, inv.args[0])
 		if err := inv.manager.Restart(inv.ctx, inv.args[0]); err != nil {
 			return fail(inv.stderr, err)
 		}
-		fmt.Fprintf(inv.stdout, "restarted the shell in %s\n", inv.args[0])
+		fmt.Fprintf(inv.stdout, "restarted the shell in %s\n%s", inv.args[0], note)
 		return 0
 	}
 	return c
@@ -253,10 +263,11 @@ func killCommand() *command {
 	c := newCommand("kill", "terminate a session")
 	c.args = []positional{sessionArg}
 	c.run = func(inv *invocation) int {
+		note := sessionRecordingNote(inv, inv.args[0])
 		if err := inv.manager.Kill(inv.ctx, inv.args[0]); err != nil {
 			return fail(inv.stderr, err)
 		}
-		fmt.Fprintf(inv.stdout, "killed %s\n", inv.args[0])
+		fmt.Fprintf(inv.stdout, "killed %s\n%s", inv.args[0], note)
 		return 0
 	}
 	return c
@@ -274,6 +285,9 @@ func doctorCommand() *command {
 			return fail(inv.stderr, err)
 		}
 		fmt.Fprintf(inv.stdout, "tmux: %s\nsocket: %s\nrecordings: %s\n", version, inv.manager.SocketPath(), root)
+		if problem := checkRecordingsRoot(root); problem != "" {
+			fmt.Fprintf(inv.stdout, "warning: recordings directory %s\n", problem)
+		}
 		sessions, err := inv.manager.List(inv.ctx)
 		if err != nil {
 			return fail(inv.stderr, err)
@@ -301,4 +315,36 @@ func helpCommand() *command {
 		return 0
 	}
 	return c
+}
+
+// checkRecordingsRoot returns "" when root exists and is writable (or does
+// not exist yet and can be created), else what is wrong, for doctor.
+func checkRecordingsRoot(root string) string {
+	info, err := os.Stat(root)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		// Created on first use: the nearest existing parent must be writable.
+		parent := filepath.Dir(root)
+		for {
+			if _, err := os.Stat(parent); err == nil {
+				break
+			}
+			next := filepath.Dir(parent)
+			if next == parent {
+				break
+			}
+			parent = next
+		}
+		if syscall.Access(parent, 2) != nil {
+			return root + " does not exist and " + parent + " is not writable, so it cannot be created"
+		}
+		return ""
+	case err != nil:
+		return root + ": " + err.Error()
+	case !info.IsDir():
+		return root + " is not a directory"
+	case syscall.Access(root, 2) != nil:
+		return root + " is not writable"
+	}
+	return ""
 }

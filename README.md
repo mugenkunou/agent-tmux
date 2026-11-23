@@ -195,8 +195,8 @@ only where the terminal echoed it, so passwords and TOTP codes (which don't echo
 out. `send`, `key`, `claim`, `release`, attach and detach are logged as events, without
 the text sent.
 
-Recordings live in `~/.local/state/agent-tmux/` (`$XDG_STATE_HOME/agent-tmux` if set;
-`agent-tmux doctor` prints it), one directory per session, named
+Recordings live in `~/.local/state/agent-tmux/` (`$XDG_STATE_HOME/agent-tmux` if set,
+`$AGENT_TMUX_STATE_DIR` overrides both; `agent-tmux path` or `doctor` prints it), one directory per session, named
 `<name>-<YYYY-MM-DD-HHMM>` (`-2`, `-3` ... on a collision). That name is the recording's
 **id**. Directories are `0700`, files `0600`:
 
@@ -222,7 +222,13 @@ agent-tmux show work               # whole recording; less on a terminal, plain 
 agent-tmux show --raw work > out   # the exact bytes, escape sequences and all
 agent-tmux grep 'connection refused'
 agent-tmux rm --older-than 30d     # move ended recordings to the trash
+agent-tmux path                    # the recordings directory
+cd "$(agent-tmux path work)"       # one recording's directory (live name, id, or session name)
+agent-tmux ls --paths              # ls with a DIR column
 ```
+
+`create`, `restart`, `kill` and `open` print `recording -> <dir>`; `help` and `version` end with
+the `Recordings:` root; `Ctrl-]` then `p` in `open` prints the directory.
 
 `show`, `rm` and `grep --session` take a live session name, a recording id, or a
 session name, which means its newest recording (for `rm`, every ended recording with
@@ -245,19 +251,19 @@ always present, zero values when it does not apply; `{"sessions":[]}` when empty
   {"name":"web","id":"web-2026-10-29-1402","state":"live","recorder":"running",
    "owner":"","clients":1,"command":"bash","path":"/home/u/src","host":"box",
    "started_at":"2026-10-29T08:32:11Z","ended_at":"","history_starts_at":"2026-10-29T08:32:11Z",
-   "bytes":1048576}
+   "bytes":1048576,"dir":"/home/u/.local/state/agent-tmux/web-2026-10-29-1402"}
 ]}
 ```
 
 `state` is `live` or `ended`. `recorder` is `running`, `stopped` (its recorder died),
 `none` (a session made by an older version, not recorded) or `""` for an ended
 recording. Times are RFC3339 UTC, `""` when unknown; `bytes` is the size of the kept
-segments.
+segments. `dir` is the absolute recording directory, `""` when there is none.
 
 `grep --json` (exit 0 with or without matches; plain `grep` exits 1 with none):
 
 ```json
-{"matches":[{"name":"web","id":"web-2026-10-29-1402","line":1234,"text":"..."}],"truncated":false}
+{"matches":[{"name":"web","id":"web-2026-10-29-1402","line":1234,"text":"...","dir":"/home/u/.local/state/agent-tmux/web-2026-10-29-1402"}],"truncated":false}
 ```
 
 `line` is the line number in the plain text that `show` prints for that recording.
@@ -335,8 +341,9 @@ unknown), `status` and `error` (only with `unknown`):
 | `watch` | Attach a read-only terminal |
 | `take` | Claim ownership and attach a writable terminal |
 | `yield` | Take control away from whoever holds it and put their terminal back to watching |
-| `ls` | List live sessions and recordings (`--json` for scripts) |
+| `ls` | List live sessions and recordings (`--json` for scripts, `--paths` for directories) |
 | `status` | Inspect one session: owner, clients, command, path, recording, recorder |
+| `path` | Print the recordings directory, or one recording's directory (`cd "$(agent-tmux path web)"`) |
 | `show` | Print a session's whole recording; pages with `less` on a terminal, plain text when piped, `--raw` for the exact bytes |
 | `grep` | Search recordings, newest first (`--json`, `--limit`, `--session`) |
 | `rm` | Move ended recordings to the trash (by id or name, or `--older-than 30d`) |

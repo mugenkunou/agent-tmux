@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mugenkunou/agent-tmux/internal/recording"
 )
 
 // No test may touch the real cache or fork a real child: TestMain (in
@@ -187,7 +189,7 @@ func TestVersionNoCacheHintsAndSpawns(t *testing.T) {
 	freshCacheDir(t)
 	setVersionVars(t, "v0.1.0", "abc1234", "2026-10-29")
 	out, _ := runVersion(t)
-	want := "agent-tmux v0.1.0 (abc1234, 2026-10-29)  latest unknown \u00b7 run 'agent-tmux version --check'\n"
+	want := "agent-tmux v0.1.0 (abc1234, 2026-10-29)  latest unknown \u00b7 run 'agent-tmux version --check'\n" + recordingsLine(t)
 	if out != want {
 		t.Fatalf("got %q", out)
 	}
@@ -454,7 +456,17 @@ func TestColourSeamUsedByCommand(t *testing.T) {
 	colorFor = func(io.Writer) bool { return true }
 	t.Cleanup(func() { colorFor = old })
 	out, _ := runVersion(t)
-	if out != "agent-tmux v0.1.0  \x1b[2mup to date\x1b[0m\n" {
+	if out != "agent-tmux v0.1.0  \x1b[2mup to date\x1b[0m\n"+recordingsLine(t) {
 		t.Fatalf("got %q", out)
 	}
+}
+
+// recordingsLine is the line plain `version` ends with.
+func recordingsLine(t *testing.T) string {
+	t.Helper()
+	root, err := recording.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "Recordings: " + tildePath(root) + "  ($AGENT_TMUX_STATE_DIR, else $XDG_STATE_HOME/agent-tmux)\n"
 }

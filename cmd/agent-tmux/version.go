@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mugenkunou/agent-tmux/internal/recording"
 )
 
 // Set at build time: -ldflags "-X main.version=v0.1.0 -X main.commit=abc1234 -X main.date=...".
@@ -189,6 +191,9 @@ func versionCommand() *command {
 			return 0
 		}
 		fmt.Fprintln(inv.stdout, textWithLatest(info, cache, palette{colorFor(inv.stdout)}))
+		if root, err := recording.Root(); err == nil {
+			fmt.Fprintf(inv.stdout, "Recordings: %s  ($AGENT_TMUX_STATE_DIR, else $XDG_STATE_HOME/agent-tmux)\n", tildePath(root))
+		}
 		return 0
 	}
 	return c

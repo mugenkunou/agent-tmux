@@ -95,6 +95,11 @@ agent-tmux grep --session <session> 'error'   # case-insensitive, newest first
 agent-tmux grep --json 'connection refused'   # across all recordings
 ```
 
+Recordings live in `~/.local/state/agent-tmux/<id>/` (`$AGENT_TMUX_STATE_DIR` or
+`$XDG_STATE_HOME/agent-tmux` override the root). `agent-tmux path [session]` prints the root or one
+recording's directory; `ls --json` and `grep --json` carry it as `dir`. Inside: `meta.json`,
+`stdout.NNNNNN.log` (raw output), `stdout.NNNNNN.timing` and `events.jsonl`.
+
 `show` and `grep --session` also take an ended session's name or a recording id from
 `agent-tmux ls`. Full-screen programs (vim, htop, progress bars) come out as redraw
 noise; `screen` is better for what is on screen right now. Input is never recorded on

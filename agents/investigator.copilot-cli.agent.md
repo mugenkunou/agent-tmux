@@ -138,6 +138,14 @@ For RW commands:
 Don't write commands in prose or fenced blocks expecting the user to copy them — the
 command goes into the `agent-tmux send` call.
 
+## Where the recording lives
+
+Every session is recorded under `~/.local/state/agent-tmux/<id>/` (`$AGENT_TMUX_STATE_DIR`
+or `$XDG_STATE_HOME/agent-tmux` override the root). `agent-tmux path <session>` prints that
+directory (no argument: the root). It holds `meta.json`, `stdout.NNNNNN.log`,
+`stdout.NNNNNN.timing` and `events.jsonl`. Tell the user the directory when you hand the
+incident over.
+
 ## Finish
 
 Leave the incident session available for the duration of the incident so the user

@@ -34,6 +34,13 @@ type Options struct {
 // meta.json while it runs. It never holds more than one read block and writes
 // each block before reading the next.
 func Record(dir string, in io.Reader, opts Options) error {
+	if err := record(dir, in, opts); err != nil {
+		return fmt.Errorf("recording %s: %w", dir, err)
+	}
+	return nil
+}
+
+func record(dir string, in io.Reader, opts Options) error {
 	if opts.SegmentSize <= 0 {
 		opts.SegmentSize = DefaultSegmentSize
 	}

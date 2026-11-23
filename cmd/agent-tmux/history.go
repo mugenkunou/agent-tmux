@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -43,12 +44,14 @@ type lsEntry struct {
 	EndedAt         string `json:"ended_at"`
 	HistoryStartsAt string `json:"history_starts_at"`
 	Bytes           int64  `json:"bytes"`
+	Dir             string `json:"dir"` // absolute recording directory, "" when none
 }
 
 func lsCommand() *command {
 	c := newCommand("ls", "list live sessions and recordings: state, recorder, owner, clients, start time")
 	c.noManager = true
 	asJSON := c.fs.Bool("json", false, "print JSON")
+	paths := c.fs.Bool("paths", false, "add a DIR column with each recording's directory")
 	c.run = func(inv *invocation) int {
 		entries, err := listAll(inv)
 		if err != nil {
@@ -65,14 +68,27 @@ func lsCommand() *command {
 			return 0
 		}
 		w := tabwriter.NewWriter(inv.stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "SESSION\tSTATE\tREC\tOWNER\tCLIENTS\tSTARTED")
+		dirCol := func(e lsEntry) string {
+			if !*paths {
+				return ""
+			}
+			if e.Dir == "" {
+				return "\t-"
+			}
+			return "\t" + tildePath(e.Dir)
+		}
+		header := "SESSION\tSTATE\tREC\tOWNER\tCLIENTS\tSTARTED"
+		if *paths {
+			header += "\tDIR"
+		}
+		fmt.Fprintln(w, header)
 		for _, e := range entries {
 			if e.State == "live" {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\n", e.Name, e.State, e.Recorder, ownerLabel(e.Owner), e.Clients, localTime(e.StartedAt))
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s%s\n", e.Name, e.State, e.Recorder, ownerLabel(e.Owner), e.Clients, localTime(e.StartedAt), dirCol(e))
 			} else {
 				// An ended recording is named by its id: that is what show
 				// and rm take, and names repeat.
-				fmt.Fprintf(w, "%s\t%s\t-\t-\t-\t%s\n", e.ID, e.State, localTime(e.StartedAt))
+				fmt.Fprintf(w, "%s\t%s\t-\t-\t-\t%s%s\n", e.ID, e.State, localTime(e.StartedAt), dirCol(e))
 			}
 		}
 		w.Flush()
@@ -116,6 +132,7 @@ func listAll(inv *invocation) ([]lsEntry, error) {
 		if r, ok := byDir[s.Recording]; ok {
 			e.ID, e.Host, e.StartedAt = r.Meta.ID, r.Meta.Host, r.Meta.StartedAt
 			e.HistoryStartsAt, e.Bytes = r.Meta.FirstSegmentAt, r.Bytes
+			e.Dir = r.Dir
 		}
 		entries = append(entries, e)
 	}
@@ -124,7 +141,7 @@ func listAll(inv *invocation) ([]lsEntry, error) {
 			continue
 		}
 		entries = append(entries, lsEntry{Name: r.Meta.Name, ID: r.Meta.ID, State: "ended", Host: r.Meta.Host,
-			StartedAt: r.Meta.StartedAt, EndedAt: r.Meta.EndedAt, HistoryStartsAt: r.Meta.FirstSegmentAt, Bytes: r.Bytes})
+			StartedAt: r.Meta.StartedAt, EndedAt: r.Meta.EndedAt, HistoryStartsAt: r.Meta.FirstSegmentAt, Bytes: r.Bytes, Dir: r.Dir})
 	}
 	return entries, nil
 }
@@ -163,9 +180,12 @@ func showRecording(inv *invocation, rec recording.Recording, raw bool) error {
 	}
 	out, ok := inv.stdout.(*os.File)
 	if !ok || !isTerminal(out) {
+		// Piped output stays pure transcript: no directory line.
 		io.WriteString(inv.stdout, notice)
 		return transcript.Render(inv.stdout, src, false)
 	}
+	// A human reading on a terminal gets the directory as the first line.
+	notice = "-- recording: " + tildePath(rec.Dir) + " --\n" + notice
 	less, err := exec.LookPath("less")
 	if err != nil {
 		io.WriteString(out, notice)
@@ -234,6 +254,7 @@ type grepMatch struct {
 	ID   string `json:"id"`
 	Line int    `json:"line"`
 	Text string `json:"text"`
+	Dir  string `json:"dir"` // absolute recording directory
 }
 
 // grepRecordings searches recordings newest first, newest line first, and
@@ -274,7 +295,7 @@ func grepRecordings(inv *invocation, needle, session string, limit int) (matches
 			continue
 		}
 		for _, m := range found {
-			matches = append(matches, grepMatch{Name: rec.Meta.Name, ID: rec.Meta.ID, Line: m.Line, Text: m.Text})
+			matches = append(matches, grepMatch{Name: rec.Meta.Name, ID: rec.Meta.ID, Line: m.Line, Text: m.Text, Dir: rec.Dir})
 		}
 		if more {
 			return matches, true, nil
@@ -308,10 +329,11 @@ func rmCommand() *command {
 			return fail(inv.stderr, err)
 		}
 		for _, rec := range selected {
-			if _, err := trash.Move(rec.Dir); err != nil {
+			stored, err := trash.Move(rec.Dir)
+			if err != nil {
 				return fail(inv.stderr, fmt.Errorf("move %s to the trash: %w", rec.Meta.ID, err))
 			}
-			fmt.Fprintf(inv.stdout, "moved to trash: %s\n", rec.Meta.ID)
+			fmt.Fprintf(inv.stdout, "moved to trash: %s (%s -> %s)\n", rec.Meta.ID, tildePath(rec.Dir), tildePath(stored))
 		}
 		return 0
 	}
@@ -528,4 +550,65 @@ func localTimeSeconds(rfc string) string {
 		return "an unknown time"
 	}
 	return t.Local().Format("2006-01-02 15:04:05")
+}
+
+// tildePath shortens a path under the home directory to ~/..., for messages
+// meant for people. JSON and the `path` command always print the full path.
+func tildePath(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" || home == "/" {
+		return p
+	}
+	if p == home {
+		return "~"
+	}
+	if strings.HasPrefix(p, home+"/") {
+		return "~" + p[len(home):]
+	}
+	return p
+}
+
+// recordingNote is the "recording -> <dir>" line printed after create, kill,
+// restart and attach; "" when the session has no recording.
+func recordingNote(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	return "recording -> " + tildePath(dir) + "\n"
+}
+
+// sessionRecordingNote looks the session's recording directory up (best
+// effort: "" when it cannot be found).
+func sessionRecordingNote(inv *invocation, name string) string {
+	s, err := inv.manager.Status(inv.ctx, name)
+	if err != nil {
+		return ""
+	}
+	return recordingNote(s.Recording)
+}
+
+func pathCommand() *command {
+	c := newCommand("path", "print the recordings directory, or one recording's directory (a live session, recording id, or session name)")
+	c.noManager = true
+	c.args = []positional{{name: "session", kind: argRecording, optional: true}}
+	c.run = func(inv *invocation) int {
+		if len(inv.args) == 0 {
+			root, err := recording.Root()
+			if err != nil {
+				return fail(inv.stderr, err)
+			}
+			if abs, err := filepath.Abs(root); err == nil {
+				root = abs
+			}
+			fmt.Fprintln(inv.stdout, root)
+			return 0
+		}
+		rec, err := resolveRecording(inv, inv.args[0])
+		if err != nil {
+			return fail(inv.stderr, err)
+		}
+		fmt.Fprintln(inv.stdout, rec.Dir)
+		return 0
+	}
+	return c
 }

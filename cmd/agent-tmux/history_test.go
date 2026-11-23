@@ -142,7 +142,7 @@ func TestLsShowsLiveAndEnded(t *testing.T) {
 	if err := json.Unmarshal([]byte(r.out), &raw); err != nil {
 		t.Fatal(err)
 	}
-	fields := strings.Fields("name id state recorder owner clients command path host started_at ended_at history_starts_at bytes")
+	fields := strings.Fields("name id state recorder owner clients command path host started_at ended_at history_starts_at bytes dir")
 	var order []string
 	for _, e := range raw.Sessions {
 		for _, f := range fields {
@@ -316,10 +316,11 @@ func TestRm(t *testing.T) {
 
 	// --older-than alone: only what ended long enough ago.
 	r := runCLI(ctx, "rm", "--older-than", "1d")
-	if r.code != 0 || r.out != "moved to trash: "+filepath.Base(ancient)+"\n" || exists(ancient) || !exists(oldRec.Dir) {
+	trashed := filepath.Join(os.Getenv("XDG_DATA_HOME"), "Trash", "files", filepath.Base(ancient))
+	wantOut := "moved to trash: " + filepath.Base(ancient) + " (" + tildePath(ancient) + " -> " + tildePath(trashed) + ")\n"
+	if r.code != 0 || r.out != wantOut || exists(ancient) || !exists(oldRec.Dir) {
 		t.Fatalf("rm --older-than 1d: exit %d, %q %q", r.code, r.out, r.err)
 	}
-	trashed := filepath.Join(os.Getenv("XDG_DATA_HOME"), "Trash", "files", filepath.Base(ancient))
 	if !exists(filepath.Join(trashed, "meta.json")) {
 		t.Error("recording not in the trash")
 	}
@@ -327,7 +328,7 @@ func TestRm(t *testing.T) {
 	if r := runCLI(ctx, "rm", "--older-than", "1d", "old"); r.code != 0 || r.out != "" || !exists(oldRec.Dir) {
 		t.Errorf("rm --older-than 1d old: exit %d, %q", r.code, r.out)
 	}
-	if r := runCLI(ctx, "rm", "old"); r.code != 0 || r.out != "moved to trash: "+oldRec.Meta.ID+"\n" || exists(oldRec.Dir) {
+	if r := runCLI(ctx, "rm", "old"); r.code != 0 || !strings.HasPrefix(r.out, "moved to trash: "+oldRec.Meta.ID+" (") || exists(oldRec.Dir) {
 		t.Errorf("rm old: exit %d, %q %q", r.code, r.out, r.err)
 	}
 	if !exists(webDir.Recording) {
@@ -355,6 +356,10 @@ func TestShowOnATerminal(t *testing.T) {
 	time.Sleep(1200 * time.Millisecond)
 	tab.write(t, "\x1d") // Ctrl-]
 	tab.waitFor(t, "[/] history")
+	// The menu's [p] shows the recording directory and stays in the menu.
+	tab.write(t, "p")
+	tab.waitFor(t, "recording -> ")
+	tab.waitFor(t, "[/] history")
 	tab.write(t, "/")
 	tab.waitFor(t, "\x1b[31mRED_2")
 	tab.reset()
@@ -368,6 +373,145 @@ func TestShowOnATerminal(t *testing.T) {
 	t.Setenv("PATH", filepath.Dir(binary))
 	plain := startOpen(t, binary, runtimeDir, "viewer", "show", "web")
 	plain.collect()
+	plain.waitFor(t, "-- recording: ")
 	plain.waitFor(t, "\x1b[31mRED_2")
 	plain.wait(t)
+}
+
+func TestPathCommand(t *testing.T) {
+	root, manager, ctx := historyEnv(t)
+	absRoot, _ := filepath.Abs(root)
+	if r := runCLI(ctx, "path"); r.code != 0 || r.out != absRoot+"\n" {
+		t.Fatalf("path = %q (exit %d)", r.out, r.code)
+	}
+	webDir := session(t, ctx, manager, "web", "echo W", "W")
+	ended := fakeEnded(t, root, "old", time.Now().Add(-72*time.Hour), time.Now().Add(-48*time.Hour), "x\n")
+	// A live name, a recording id and an ended session's name all resolve.
+	for key, want := range map[string]string{"web": webDir, filepath.Base(webDir): webDir, "old": ended, filepath.Base(ended): ended} {
+		if r := runCLI(ctx, "path", key); r.code != 0 || r.out != want+"\n" {
+			t.Errorf("path %s = %q (exit %d), want %q", key, r.out, r.code, want)
+		}
+	}
+	r := runCLI(ctx, "path", "nope")
+	if r.code != 1 || r.out != "" || !strings.Contains(r.err, `no recording "nope"`) {
+		t.Errorf("path nope: exit %d, %q %q", r.code, r.out, r.err)
+	}
+	if r := runCLI(ctx, "path", "a", "b"); r.code != 2 {
+		t.Errorf("path with two arguments: exit %d", r.code)
+	}
+}
+
+func TestDirInJSONAndPaths(t *testing.T) {
+	root, manager, ctx := historyEnv(t)
+	webDir := session(t, ctx, manager, "web", "echo WEB_$((1+1))", "WEB_2")
+	ended := fakeEnded(t, root, "old", time.Now().Add(-72*time.Hour), time.Now().Add(-48*time.Hour), "NEEDLE\n")
+
+	var ls struct{ Sessions []lsEntry }
+	r := runCLI(ctx, "ls", "--json")
+	if err := json.Unmarshal([]byte(r.out), &ls); err != nil {
+		t.Fatal(err)
+	}
+	dirs := map[string]string{}
+	for _, e := range ls.Sessions {
+		dirs[e.Name] = e.Dir
+	}
+	if dirs["web"] != webDir || dirs["old"] != ended {
+		t.Errorf("ls --json dirs = %v, want web=%s old=%s", dirs, webDir, ended)
+	}
+
+	var g struct{ Matches []grepMatch }
+	r = runCLI(ctx, "grep", "--json", "NEEDLE")
+	if err := json.Unmarshal([]byte(r.out), &g); err != nil || len(g.Matches) != 1 || g.Matches[0].Dir != ended {
+		t.Errorf("grep --json = %q (%v)", r.out, err)
+	}
+
+	// Off by default, a DIR column with ~ abbreviation under --paths.
+	if r := runCLI(ctx, "ls"); strings.Contains(r.out, "DIR") {
+		t.Errorf("plain ls has a DIR column:\n%s", r.out)
+	}
+	r = runCLI(ctx, "ls", "--paths")
+	if !strings.Contains(r.out, "DIR") || !strings.Contains(r.out, tildePath(webDir)) || !strings.Contains(r.out, tildePath(ended)) {
+		t.Errorf("ls --paths:\n%s", r.out)
+	}
+}
+
+func TestLifecycleMessagesNameTheRecording(t *testing.T) {
+	_, manager, ctx := historyEnv(t)
+	stdin, w, err := os.Pipe() // create must not attach: stdin is no terminal
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stdin
+	os.Stdin = stdin
+	defer func() { os.Stdin = saved; stdin.Close(); w.Close() }()
+
+	r := runCLI(ctx, "create", "web")
+	if r.code != 0 {
+		t.Fatalf("create: %q %q", r.out, r.err)
+	}
+	s, _ := manager.Status(ctx, "web")
+	want := "recording -> " + tildePath(s.Recording) + "\n"
+	if !strings.Contains(r.out, want) {
+		t.Errorf("create output lacks %q:\n%s", want, r.out)
+	}
+	if r := runCLI(ctx, "restart", "web"); !strings.Contains(r.out, want) {
+		t.Errorf("restart output lacks %q:\n%s", want, r.out)
+	}
+	if r := runCLI(ctx, "kill", "web"); !strings.HasPrefix(r.out, "killed web\n") || !strings.Contains(r.out, want) {
+		t.Errorf("kill output lacks %q:\n%s", want, r.out)
+	}
+}
+
+func TestHelpAndDoctorShowTheRoot(t *testing.T) {
+	root, _, ctx := historyEnv(t)
+	var out bytes.Buffer
+	printUsage(&out, commands())
+	if !strings.Contains(out.String(), "Recordings: "+tildePath(root)) || !strings.Contains(out.String(), "$AGENT_TMUX_STATE_DIR") {
+		t.Errorf("usage lacks the recordings root:\n%s", out.String())
+	}
+	if r := runCLI(ctx, "doctor"); !strings.Contains(r.out, "recordings: "+root+"\n") || strings.Contains(r.out, "warning: recordings directory") {
+		t.Errorf("doctor:\n%s", r.out)
+	}
+
+	// A root that is a file, or cannot be created, is flagged.
+	file := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := checkRecordingsRoot(file); !strings.Contains(got, "not a directory") {
+		t.Errorf("file root: %q", got)
+	}
+	if got := checkRecordingsRoot(filepath.Join(root, "later", "deeper")); got != "" {
+		t.Errorf("a root that can still be created: %q", got)
+	}
+	if os.Getuid() != 0 {
+		ro := t.TempDir()
+		if err := os.Chmod(ro, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chmod(ro, 0o700)
+		if got := checkRecordingsRoot(ro); !strings.Contains(got, "not writable") {
+			t.Errorf("read-only root: %q", got)
+		}
+		if got := checkRecordingsRoot(filepath.Join(ro, "x")); !strings.Contains(got, "cannot be created") {
+			t.Errorf("uncreatable root: %q", got)
+		}
+	}
+}
+
+func TestTildePath(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	for in, want := range map[string]string{home: "~", home + "/a/b": "~/a/b", home + "x/a": home + "x/a", "/etc/x": "/etc/x"} {
+		if got := tildePath(in); got != want {
+			t.Errorf("tildePath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRecorderErrorNamesTheDirectory(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "gone")
+	err := recording.Record(missing, strings.NewReader(""), recording.Options{})
+	if err == nil || !strings.Contains(err.Error(), missing) {
+		t.Errorf("Record error = %v, want it to name %s", err, missing)
+	}
 }
